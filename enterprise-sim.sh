@@ -292,12 +292,21 @@ generate_sample_app_env() {
   derive_env_defaults
   : "${NAMESPACE:=region-${REGION}}"
 
-  # Validate storage class if storage is enabled
+  # Validate storage class if storage is enabled (skip validation during platform setup)
   if [ "${STORAGE_PERSISTENT_ENABLED:-false}" = "true" ]; then
-    if ! kubectl get storageclass "${STORAGE_PERSISTENT_CLASS}" >/dev/null 2>&1; then
+    # Only validate if we have a running cluster with storage platform
+    if kubectl get storageclass "${STORAGE_PERSISTENT_CLASS}" >/dev/null 2>&1; then
+      log "Storage enabled: class=${STORAGE_PERSISTENT_CLASS}, size=${STORAGE_PERSISTENT_SIZE:-1Gi}"
+    elif [ "${ENTERPRISE_SIM_SKIP_STORAGE_VALIDATION:-}" = "true" ]; then
+      # Skip validation when explicitly requested (during platform setup)
+      log "Storage enabled: class=${STORAGE_PERSISTENT_CLASS}, size=${STORAGE_PERSISTENT_SIZE:-1Gi} (validation skipped)"
+    elif kubectl get nodes >/dev/null 2>&1; then
+      # We have a running cluster but missing storage class
       fail "Storage class '${STORAGE_PERSISTENT_CLASS}' not found. Install storage platform with: ./enterprise-sim.sh storage up"
+    else
+      # No cluster or cluster not ready - skip validation (probably during platform setup)
+      log "Storage enabled: class=${STORAGE_PERSISTENT_CLASS}, size=${STORAGE_PERSISTENT_SIZE:-1Gi} (validation skipped - cluster not ready)"
     fi
-    log "Storage enabled: class=${STORAGE_PERSISTENT_CLASS}, size=${STORAGE_PERSISTENT_SIZE:-1Gi}"
   fi
 
   # Write app-only .env file (app only sees what it needs)
@@ -310,6 +319,18 @@ EOF
   export NAMESPACE APP_NAME REGION
   # Export storage variables for templating
   export STORAGE_PERSISTENT_ENABLED STORAGE_PERSISTENT_SIZE STORAGE_PERSISTENT_CLASS
+  # Export S3 variables for templating
+  export S3_ENABLED S3_BUCKET_NAME S3_ENDPOINT S3_USE_SSL
+
+  # Set S3 envFrom section based on S3_ENABLED
+  if [ "${S3_ENABLED:-false}" = "true" ]; then
+    export S3_ENV_FROM_SECTION="envFrom:
+        - secretRef:
+            name: ${APP_NAME}-s3-credentials"
+  else
+    export S3_ENV_FROM_SECTION=""
+  fi
+
   # Also export platform config for status display
   export K3S_INGRESS_DOMAIN
 
@@ -841,6 +862,44 @@ cmd_validate() {
     print_check OK "OpenEBS not installed (install with './enterprise-sim.sh storage up')"
   fi
 
+  echo "\n== Object Storage Platform (optional) =="
+  if kubectl get ns minio-operator >/dev/null 2>&1; then
+    print_check OK "MinIO Operator namespace exists"
+
+    # Check MinIO Operator
+    if kubectl -n minio-operator get deploy minio-operator >/dev/null 2>&1; then
+      kubectl -n minio-operator rollout status deploy/minio-operator --timeout=1s >/dev/null 2>&1 && \
+        print_check OK "MinIO Operator ready" || print_check FAIL "MinIO Operator not ready"
+    else
+      print_check FAIL "MinIO Operator not found"
+    fi
+
+    # Check MinIO Tenant
+    if kubectl get ns minio-system >/dev/null 2>&1; then
+      print_check OK "MinIO system namespace exists"
+
+      # Check tenant status
+      local tenant_ready=$(kubectl -n minio-system get tenant enterprise-sim -o jsonpath='{.status.currentState}' 2>/dev/null)
+      if [ "$tenant_ready" = "Initialized" ]; then
+        print_check OK "MinIO tenant ready"
+      else
+        print_check FAIL "MinIO tenant not ready (status: ${tenant_ready:-unknown})"
+      fi
+
+      # Check MinIO pods
+      local minio_pods=$(kubectl -n minio-system get pods --no-headers 2>/dev/null | wc -l | tr -d ' ')
+      if [ "$minio_pods" -gt 0 ]; then
+        print_check OK "MinIO pods running ($minio_pods pods)"
+      else
+        print_check FAIL "No MinIO pods found"
+      fi
+    else
+      print_check FAIL "MinIO system namespace not found"
+    fi
+  else
+    print_check OK "MinIO not installed (install with './enterprise-sim.sh minio up')"
+  fi
+
   echo
   if [ $ok -eq 0 ]; then
     echo "All core checks passed. You can now add routes or deploy sample services."
@@ -859,6 +918,10 @@ cmd_app_deploy() {
   load_environment_config
 
   log "Deploying sample application with platform configuration"
+
+  # Build and import app image if needed
+  log "Ensuring sample app image is available..."
+  build_and_import_app_image
 
   # Generate app environment and export platform variables
   generate_sample_app_env
@@ -896,11 +959,24 @@ cmd_app_deploy() {
 EOF
   fi
 
+  # S3 credentials injection is now handled via template variable substitution
+
   # Template PVC if storage is enabled
   if [ "${STORAGE_PERSISTENT_ENABLED:-false}" = "true" ]; then
     log "Storage enabled - creating PersistentVolumeClaim"
     if [ -f "$APP_DIR/pvc.yaml" ]; then
       envsubst < "$APP_DIR/pvc.yaml" > "$TEMP_DIR/pvc.yaml"
+    fi
+  fi
+
+  # Setup S3 bucket if enabled
+  if [ "${S3_ENABLED:-false}" = "true" ]; then
+    log "S3 enabled - setting up bucket and credentials"
+    # Check if MinIO is available
+    if kubectl get tenant enterprise-sim -n minio-system >/dev/null 2>&1; then
+      setup_app_s3_bucket "$APP_NAME" "$NAMESPACE" "${S3_BUCKET_NAME:-app-data}"
+    else
+      log "Warning: S3 enabled but MinIO not installed. Run: ./enterprise-sim.sh minio up"
     fi
   fi
 
@@ -1141,11 +1217,13 @@ cmd_storage_up() {
     --set localpv-provisioner.hostpathClass.enabled=true \
     --set localpv-provisioner.hostpathClass.name=openebs-hostpath \
     --set localpv-provisioner.hostpathClass.isDefaultClass=false \
-    --wait --timeout=300s
+    --set ndm.enabled=false \
+    --set ndmOperator.enabled=false \
+    --wait --timeout=600s
 
   # Wait for OpenEBS components to be ready
   log "Waiting for OpenEBS components to be ready..."
-  kubectl -n openebs-system wait --for=condition=ready pod --all --timeout=180s
+  kubectl -n openebs-system wait --for=condition=ready pod --all --timeout=300s
 
   # Apply storage classes
   log "Creating enterprise storage classes..."
@@ -1217,10 +1295,305 @@ EOF
   kubectl apply -f "$TMPFILE"
 }
 
+cmd_minio_up() {
+  check_deps_basic
+  check_deps_helm
+
+  # Load environment configuration for domain variables
+  load_environment_config
+
+  log "Installing MinIO object storage platform..."
+
+  # Add MinIO Helm repository
+  log "Adding MinIO Helm repository..."
+  helm repo add minio-operator https://operator.min.io >/dev/null 2>&1 || true
+  helm repo update >/dev/null 2>&1
+
+  # Install MinIO Operator
+  log "Installing MinIO Operator..."
+  helm upgrade --install minio-operator minio-operator/operator \
+    --namespace minio-operator \
+    --create-namespace \
+    --set operator.replicaCount=1 \
+    --set console.enabled=true \
+    --set console.service.type=ClusterIP \
+    --wait --timeout=600s
+
+  # Wait for MinIO Operator to be ready
+  log "Waiting for MinIO Operator to be ready..."
+  kubectl -n minio-operator wait --for=condition=ready pod --all --timeout=300s
+
+  # Create MinIO Tenant namespace
+  MINIO_NAMESPACE="minio-system"
+  kubectl create namespace "$MINIO_NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+
+  # Label namespace for Istio injection
+  kubectl label namespace "$MINIO_NAMESPACE" istio-injection=enabled --overwrite
+
+  # Apply MinIO Tenant configuration
+  log "Creating MinIO Tenant with enterprise configuration..."
+  apply_minio_tenant
+
+  # Create MinIO Console external routing
+  log "Setting up MinIO Console external access..."
+  ROUTE_TMPFILE=$(mktemp)
+
+  cat > "$ROUTE_TMPFILE" <<EOF
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: minio-console-external
+  namespace: minio-system
+  labels:
+    compliance.routing/enabled: "true"
+spec:
+  hosts:
+  - minio-console.${K3S_INGRESS_DOMAIN}
+  gateways:
+  - istio-system/local-sim-gateway
+  http:
+  - match:
+    - uri:
+        prefix: /
+    route:
+    - destination:
+        host: enterprise-sim-console.minio-system.svc.cluster.local
+        port:
+          number: 9090
+EOF
+
+  kubectl apply -f "$ROUTE_TMPFILE"
+  rm -f "$ROUTE_TMPFILE"
+
+  log "MinIO object storage platform installed successfully!"
+  echo
+  echo "MinIO Services:"
+  kubectl get pods -n minio-operator
+  kubectl get pods -n "$MINIO_NAMESPACE"
+  echo
+  echo "MinIO Console Access:"
+  echo "  URL: https://minio-console.${K3S_INGRESS_DOMAIN}"
+  echo "  S3 API: https://s3.${K3S_INGRESS_DOMAIN}"
+}
+
+apply_minio_tenant() {
+  TMPFILE=$(mktemp)
+  trap 'rm -f "$TMPFILE"' EXIT
+
+  cat > "$TMPFILE" <<EOF
+---
+# MinIO credentials secret - must be created first
+apiVersion: v1
+kind: Secret
+metadata:
+  name: minio-credentials
+  namespace: minio-system
+  labels:
+    app: minio
+    compliance.platform: enterprise-sim
+type: Opaque
+stringData:
+  config.env: |
+    export MINIO_ROOT_USER="enterprise-admin"
+    export MINIO_ROOT_PASSWORD="enterprise-password-123"
+---
+# Console secret
+apiVersion: v1
+kind: Secret
+metadata:
+  name: console-secret
+  namespace: minio-system
+type: Opaque
+stringData:
+  CONSOLE_PBKDF_PASSPHRASE: "enterprise-sim-console-secret"
+  CONSOLE_PBKDF_SALT: "enterprise-sim-salt"
+---
+# MinIO Tenant for Enterprise Simulation Platform
+apiVersion: minio.min.io/v2
+kind: Tenant
+metadata:
+  name: enterprise-sim
+  namespace: minio-system
+  labels:
+    app: minio
+    compliance.platform: enterprise-sim
+    compliance.service: object-storage
+spec:
+  # Tenant configuration
+  image: quay.io/minio/minio:RELEASE.2024-09-09T16-59-28Z
+  configuration:
+    name: minio-credentials
+  pools:
+  - name: pool-0
+    servers: 4
+    volumesPerServer: 1
+    volumeClaimTemplate:
+      metadata:
+        name: data
+      spec:
+        accessModes:
+        - ReadWriteOnce
+        resources:
+          requests:
+            storage: 10Gi
+        storageClassName: enterprise-standard
+  # Security and networking
+  requestAutoCert: false  # We'll use Istio mTLS
+---
+# NetworkPolicy for MinIO
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: minio-netpol
+  namespace: minio-system
+  labels:
+    compliance.platform: enterprise-sim
+    compliance.security: zero-trust
+spec:
+  podSelector:
+    matchLabels:
+      app: minio
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow traffic from Istio ingress gateway
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: istio-system
+  # Allow traffic from region namespaces (apps)
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          compliance.region: us
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          compliance.region: eu
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          compliance.region: ap
+  egress:
+  # Allow DNS resolution
+  - to: []
+    ports:
+    - protocol: UDP
+      port: 53
+  # Allow communication within MinIO namespace
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: minio-system
+EOF
+
+  kubectl apply -f "$TMPFILE"
+
+  # Add MinIO external routing through platform gateway
+  log "Creating MinIO external routing..."
+  ROUTE_TMPFILE=$(mktemp)
+  trap 'rm -f "$ROUTE_TMPFILE"' EXIT
+
+  cat > "$ROUTE_TMPFILE" <<EOF
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: minio-external
+  namespace: minio-system
+  labels:
+    compliance.routing/enabled: "true"
+spec:
+  hosts:
+  - s3.${K3S_INGRESS_DOMAIN}
+  gateways:
+  - istio-system/local-sim-gateway
+  http:
+  - match:
+    - uri:
+        prefix: /
+    route:
+    - destination:
+        host: minio.minio-system.svc.cluster.local
+        port:
+          number: 80
+EOF
+
+  kubectl apply -f "$ROUTE_TMPFILE"
+}
+
+setup_app_s3_bucket() {
+  local app_name="$1"
+  local namespace="$2"
+  local bucket_name="${3:-app-data}"
+
+  log "Setting up S3 credentials for app: $app_name in namespace: $namespace"
+
+  # Create temporary file for S3 credentials secret
+  TMPFILE=$(mktemp)
+  trap 'rm -f "$TMPFILE"' EXIT
+
+  # Substitute variables in the template
+  export APP_NAME="$app_name"
+  export NAMESPACE="$namespace"
+  export S3_BUCKET_NAME="$bucket_name"
+
+  envsubst < manifests/minio/bucket-template.yaml > "$TMPFILE"
+
+  # Apply the S3 credentials secret
+  kubectl apply -f "$TMPFILE"
+
+  log "S3 credentials created for $app_name"
+}
+
+build_and_import_app_image() {
+  # Load environment configuration
+  load_environment_config
+
+  APP_DIR="$(dirname "$0")/sample-app"
+  if [ ! -d "$APP_DIR" ]; then
+    fail "Sample app directory not found: $APP_DIR"
+  fi
+
+  log "Building sample app Docker image..."
+  # Build the multi-stage Docker image (React frontend + Python backend)
+  if ! docker build -t hello-app:latest "$APP_DIR"; then
+    fail "Failed to build sample app Docker image"
+  fi
+
+  log "Importing app image into k3d cluster..."
+  # Import the image into the k3d cluster
+  if ! k3d image import hello-app:latest -c "$CLUSTER_NAME"; then
+    fail "Failed to import app image into k3d cluster"
+  fi
+
+  log "Sample app image built and imported successfully"
+}
+
 cmd_reset() {
   log "[reset] Tearing down platform (down + wipe app env/cluster)..."
   cmd_down
+  log "[reset] Building complete platform (soup to nuts)..."
+
+  # Skip storage validation during platform setup
+  export ENTERPRISE_SIM_SKIP_STORAGE_VALIDATION=true
+
   cmd_full_up
+  log "[reset] Installing storage platform..."
+  cmd_storage_up
+  log "[reset] Installing MinIO object storage..."
+  cmd_minio_up
+  log "[reset] Building and importing sample app image..."
+  build_and_import_app_image
+
+  # Re-enable storage validation
+  unset ENTERPRISE_SIM_SKIP_STORAGE_VALIDATION
+
+  log "[reset] Complete platform reset finished!"
+  echo
+  echo "Platform ready for applications:"
+  echo "  Deploy app: ./enterprise-sim.sh app deploy"
+  echo "  Validate:   ./enterprise-sim.sh validate"
 }
 
 usage() {
@@ -1231,13 +1604,14 @@ Commands:
   configure           Setup CloudFlare credentials for Let's Encrypt certificates
   up                  Create k3d cluster with ports 80/443 mapped (Traefik disabled)
   full-up             Full end-to-end platform build (runs up, istio, certmgr, tls, regions, gateway)
-  reset               Teardown everything and re-run full-up (cluster, env, app)
+  reset               Complete platform rebuild: cluster + Istio + cert-manager + TLS + regions + gateway + storage + MinIO + app image
   down                Delete the k3d cluster and app env file
   status              Show cluster and node status (if KUBECONFIG set)
   certmgr up          Install cert-manager for Let's Encrypt certificates
   istio up            Install Istio service mesh with demo profile
   tls up              Setup TLS certificates (auto-detects cert-manager vs self-signed)
   storage up          Install OpenEBS storage platform with enterprise storage classes
+  minio up            Install MinIO object storage with S3-compatible API
   regions up          Create region namespaces and apply zero-trust policies
   gateway up          Apply wildcard HTTPS gateway using TLS secret
   routes reconcile    Auto-generate VirtualServices from labeled Services
@@ -1260,11 +1634,12 @@ Manual Setup:
   3. $0 istio up           # Install Istio service mesh
   4. $0 certmgr up         # Install cert-manager (optional)
   5. $0 storage up         # Install OpenEBS storage platform (optional)
-  6. $0 tls up             # Setup TLS certificates
-  7. $0 regions up         # Create region namespaces
-  8. $0 gateway up         # Setup wildcard gateway
-  9. $0 app deploy         # Deploy sample application
-  10. $0 validate          # Verify everything is working
+  6. $0 minio up           # Install MinIO object storage (optional)
+  7. $0 tls up             # Setup TLS certificates
+  8. $0 regions up         # Create region namespaces
+  9. $0 gateway up         # Setup wildcard gateway
+  10. $0 app deploy         # Deploy sample application
+  11. $0 validate          # Verify everything is working
 
 Environment Configuration:
   Environment determined by single config file in config/ directory:
@@ -1314,6 +1689,7 @@ main() {
     tls) shift; case "${1:-}" in up) shift; cmd_tls_up "$@" ;; *) usage ;; esac ;;
     istio) shift; case "${1:-}" in up) shift; cmd_istio_up "$@" ;; *) usage ;; esac ;;
     storage) shift; case "${1:-}" in up) shift; cmd_storage_up "$@" ;; *) usage ;; esac ;;
+    minio) shift; case "${1:-}" in up) shift; cmd_minio_up "$@" ;; *) usage ;; esac ;;
     regions) shift; case "${1:-}" in up) shift; cmd_regions_up "$@" ;; *) usage ;; esac ;;
     gateway) shift; case "${1:-}" in up) shift; cmd_gateway_up "$@" ;; *) usage ;; esac ;;
     routes) shift; case "${1:-}" in reconcile) shift; cmd_routes_reconcile "$@" ;; *) usage ;; esac ;;

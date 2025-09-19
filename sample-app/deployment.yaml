@@ -48,6 +48,9 @@ spec:
           value: "${REGION}"
         - name: NAMESPACE
           value: "${NAMESPACE}"
+        - name: S3_ENABLED
+          value: "${S3_ENABLED}"
+        ${S3_ENV_FROM_SECTION}
         # Health and readiness probes using new API endpoints
         livenessProbe:
           httpGet:

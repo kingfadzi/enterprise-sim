@@ -1,0 +1,16 @@
+# Simplified S3 Credentials Template
+# This template creates app-specific S3 credentials for platform-managed object storage
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ${APP_NAME}-s3-credentials
+  namespace: ${NAMESPACE}
+  labels:
+    app: ${APP_NAME}
+    compliance.platform: enterprise-sim
+    compliance.s3/managed-by: platform
+type: Opaque
+stringData:
+  AWS_ACCESS_KEY_ID: "${APP_NAME}-user"
+  AWS_SECRET_ACCESS_KEY: "${APP_NAME}-secret-key"
+  S3_BUCKET_NAME: "${S3_BUCKET_NAME}"

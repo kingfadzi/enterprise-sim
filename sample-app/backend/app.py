@@ -7,6 +7,7 @@ import os
 import json
 import socket
 import subprocess
+import time
 from datetime import datetime
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
@@ -177,7 +178,7 @@ def get_disaster_recovery_status(storage_info):
         }
 
 def get_s3_storage_status():
-    """Get MinIO/S3 storage status"""
+    """Get MinIO/S3 storage status with actual connectivity testing"""
     try:
         # Check for MinIO service
         minio_available = False
@@ -185,20 +186,78 @@ def get_s3_storage_status():
             import socket
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(1)
-            result = sock.connect_ex(('minio', 9000))
+            # Try the internal service name first
+            result = sock.connect_ex(('minio.minio-system.svc.cluster.local', 80))
+            if result != 0:
+                # Try alternative service names
+                result = sock.connect_ex(('minio', 9000))
             sock.close()
             minio_available = (result == 0)
         except:
             pass
 
         # Check for S3 environment variables
-        s3_configured = bool(os.environ.get('AWS_ACCESS_KEY_ID') or os.environ.get('MINIO_ACCESS_KEY'))
+        s3_configured = bool(os.environ.get('AWS_ACCESS_KEY_ID') and os.environ.get('S3_BUCKET_NAME'))
+
+        # Test actual S3 connectivity if configured
+        bucket_access = False
+        bucket_test_details = {}
+        if s3_configured:
+            try:
+                import boto3
+                from botocore.client import Config
+
+                # Get S3 credentials from environment
+                access_key = os.environ.get('AWS_ACCESS_KEY_ID')
+                secret_key = os.environ.get('AWS_SECRET_ACCESS_KEY')
+                bucket_name = os.environ.get('S3_BUCKET_NAME', 'app-data')
+
+                # Use internal MinIO service endpoint (cluster-internal communication)
+                endpoint_url = "http://minio.minio-system.svc.cluster.local"
+
+                # Create S3 client
+                s3_client = boto3.client(
+                    's3',
+                    aws_access_key_id=access_key,
+                    aws_secret_access_key=secret_key,
+                    endpoint_url=endpoint_url,
+                    config=Config(signature_version='s3v4'),
+                    region_name='us-east-1'  # MinIO doesn't care about region
+                )
+
+                # Test bucket access by listing objects
+                response = s3_client.list_objects_v2(Bucket=bucket_name, MaxKeys=1)
+                bucket_access = True
+                bucket_test_details = {
+                    "bucket_exists": True,
+                    "objects_count": response.get('KeyCount', 0),
+                    "endpoint_tested": endpoint_url
+                }
+
+                # Try to put a test object
+                test_key = f"connectivity-test-{int(time.time())}.txt"
+                s3_client.put_object(
+                    Bucket=bucket_name,
+                    Key=test_key,
+                    Body=f"Connectivity test from {os.environ.get('APP_NAME', 'app')} at {datetime.utcnow().isoformat()}"
+                )
+                bucket_test_details["write_test"] = "success"
+
+                # Clean up test object
+                s3_client.delete_object(Bucket=bucket_name, Key=test_key)
+
+            except Exception as boto_error:
+                bucket_test_details = {
+                    "error": str(boto_error),
+                    "endpoint_tested": endpoint_url if 'endpoint_url' in locals() else "unknown"
+                }
 
         return {
             "minio_available": minio_available,
             "s3_configured": s3_configured,
-            "bucket_access": False,  # Would need to test actual bucket operations
-            "configured": minio_available or s3_configured
+            "bucket_access": bucket_access,
+            "bucket_details": bucket_test_details,
+            "configured": minio_available and s3_configured  # S3 is configured if service is available and credentials exist
         }
     except Exception as e:
         return {
