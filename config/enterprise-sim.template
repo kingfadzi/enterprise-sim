@@ -1,0 +1,35 @@
+# Enterprise Simulation Configuration Template
+# Copy this file to enterprise-sim.{env} and customize for your environment
+#
+# Example:
+#   cp config/enterprise-sim.template config/enterprise-sim.dev
+#   cp config/enterprise-sim.template config/enterprise-sim.prod
+#
+# IMPORTANT: Only ONE config file should exist to prevent accidental deployments
+
+# Environment settings (automatically determined from config filename)
+# Valid filename patterns: enterprise-sim.local, enterprise-sim.dev, enterprise-sim.staging, enterprise-sim.prod
+# The environment is automatically derived from the config file name
+
+# Domain configuration (REQUIRED)
+# Base domain for your environment - script will use {ENVIRONMENT}.{BASE_DOMAIN}
+# For local development, you can use localhost or local.yourdomain.com
+export BASE_DOMAIN="CHANGEME.com"
+
+# Certificate configuration (automatically determined)
+# - Production environment (prod) automatically uses Let's Encrypt production
+# - All other environments use Let's Encrypt staging
+
+# CloudFlare configuration for Let's Encrypt (REQUIRED for real certificates)
+# Get these from: https://dash.cloudflare.com/profile/api-tokens
+export CLOUDFLARE_EMAIL="CHANGEME@example.com"
+export CLOUDFLARE_API_TOKEN="CHANGEME_API_TOKEN"
+export CLOUDFLARE_ZONE_ID="CHANGEME_ZONE_ID"
+
+# Cluster settings (OPTIONAL - defaults will be used if not set)
+export CLUSTER_NAME="enterprise-sim-${ENVIRONMENT}"
+
+# For localhost/development without real certificates, comment out CloudFlare settings:
+# unset CLOUDFLARE_EMAIL
+# unset CLOUDFLARE_API_TOKEN
+# unset CLOUDFLARE_ZONE_ID

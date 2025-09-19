@@ -1,0 +1,2 @@
+# This directory stores certificate backups for cluster recovery
+# Certificate backups are created automatically and used during cluster resets

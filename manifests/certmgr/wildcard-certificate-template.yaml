@@ -1,0 +1,14 @@
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: ${CERT_NAME}
+  namespace: istio-system
+spec:
+  secretName: ${TLS_SECRET_NAME}
+  issuerRef:
+    name: ${SSL_ISSUER_NAME}
+    kind: ClusterIssuer
+  dnsNames:
+  - "*.${K3S_INGRESS_DOMAIN}"
+  - "${K3S_INGRESS_DOMAIN}"
