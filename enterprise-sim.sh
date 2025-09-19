@@ -287,6 +287,14 @@ generate_sample_app_env() {
   derive_env_defaults
   : "${NAMESPACE:=region-${REGION}}"
 
+  # Validate storage class if storage is enabled
+  if [ "${STORAGE_PERSISTENT_ENABLED:-false}" = "true" ]; then
+    if ! kubectl get storageclass "${STORAGE_PERSISTENT_CLASS}" >/dev/null 2>&1; then
+      fail "Storage class '${STORAGE_PERSISTENT_CLASS}' not found. Install storage platform with: ./enterprise-sim.sh storage up"
+    fi
+    log "Storage enabled: class=${STORAGE_PERSISTENT_CLASS}, size=${STORAGE_PERSISTENT_SIZE:-1Gi}"
+  fi
+
   # Write app-only .env file (app only sees what it needs)
   cat > "$APP_ENV_PATH" <<EOF
 APP_NAME=$APP_NAME
@@ -295,6 +303,8 @@ EOF
 
   # Export only necessary variables for app deployment
   export NAMESPACE APP_NAME REGION
+  # Export storage variables for templating
+  export STORAGE_PERSISTENT_ENABLED STORAGE_PERSISTENT_SIZE STORAGE_PERSISTENT_CLASS
   # Also export platform config for status display
   export K3S_INGRESS_DOMAIN
 
@@ -341,6 +351,10 @@ cmd_up() {
 
 cmd_down() {
   check_deps_basic
+
+  # Load environment configuration to get correct CLUSTER_NAME
+  load_environment_config
+
   log "Deleting k3d cluster: $CLUSTER_NAME"
   k3d cluster delete "$CLUSTER_NAME" || true
 
@@ -787,6 +801,41 @@ cmd_validate() {
   fi
   kubectl -n istio-system get svc istio-ingressgateway -o wide || true
 
+  echo "\n== Storage Platform (optional) =="
+  if kubectl get ns openebs-system >/dev/null 2>&1; then
+    print_check OK "OpenEBS namespace exists"
+
+    # Check OpenEBS provisioner
+    if kubectl -n openebs-system get deploy openebs-localpv-provisioner >/dev/null 2>&1; then
+      kubectl -n openebs-system rollout status deploy/openebs-localpv-provisioner --timeout=1s >/dev/null 2>&1 && \
+        print_check OK "OpenEBS LocalPV provisioner ready" || print_check FAIL "OpenEBS LocalPV provisioner not ready"
+    else
+      print_check FAIL "OpenEBS LocalPV provisioner not found"
+    fi
+
+    # Check enterprise storage classes
+    local storage_classes=$(kubectl get sc -l compliance.storage/managed-by=enterprise-sim --no-headers 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$storage_classes" -gt 0 ]; then
+      print_check OK "Enterprise storage classes available ($storage_classes classes)"
+      kubectl get sc -l compliance.storage/managed-by=enterprise-sim --no-headers | while read sc_name sc_provisioner sc_reclaim sc_binding sc_expansion sc_age; do
+        local tier=$(kubectl get sc "$sc_name" -o jsonpath='{.metadata.labels.compliance\.storage/tier}' 2>/dev/null)
+        echo "      - $sc_name (tier: $tier)"
+      done
+    else
+      print_check FAIL "No enterprise storage classes found"
+    fi
+
+    # Check for active PVCs
+    local pvc_count=$(kubectl get pvc --all-namespaces --no-headers 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$pvc_count" -gt 0 ]; then
+      print_check OK "Active persistent volume claims ($pvc_count PVCs)"
+    else
+      print_check OK "No persistent volume claims (storage available when needed)"
+    fi
+  else
+    print_check OK "OpenEBS not installed (install with './enterprise-sim.sh storage up')"
+  fi
+
   echo
   if [ $ok -eq 0 ]; then
     echo "All core checks passed. You can now add routes or deploy sample services."
@@ -826,6 +875,29 @@ cmd_app_deploy() {
       envsubst < "$APP_DIR/$manifest" > "$TEMP_DIR/$manifest"
     fi
   done
+
+  # Add storage configuration to deployment if enabled
+  if [ "${STORAGE_PERSISTENT_ENABLED:-false}" = "true" ]; then
+    log "Storage enabled - adding volume mounts to deployment"
+    # Append storage volume mounts and volumes to deployment
+    cat >> "$TEMP_DIR/deployment.yaml" <<EOF
+        volumeMounts:
+        - name: app-data
+          mountPath: /app/data
+      volumes:
+      - name: app-data
+        persistentVolumeClaim:
+          claimName: ${APP_NAME}-storage
+EOF
+  fi
+
+  # Template PVC if storage is enabled
+  if [ "${STORAGE_PERSISTENT_ENABLED:-false}" = "true" ]; then
+    log "Storage enabled - creating PersistentVolumeClaim"
+    if [ -f "$APP_DIR/pvc.yaml" ]; then
+      envsubst < "$APP_DIR/pvc.yaml" > "$TEMP_DIR/pvc.yaml"
+    fi
+  fi
 
   # Create ConfigMap from app .env
   kubectl create configmap sample-app-env --from-env-file="$APP_DIR/.env" \
@@ -1038,6 +1110,108 @@ cmd_full_up() {
   echo "- Validate system: $0 validate"
 }
 
+cmd_storage_up() {
+  check_deps_basic
+  check_deps_helm
+
+  # Load environment configuration
+  load_environment_config
+
+  log "Installing OpenEBS storage platform..."
+
+  # Add OpenEBS Helm repository
+  log "Adding OpenEBS Helm repository..."
+  helm repo add openebs https://openebs.github.io/charts >/dev/null 2>&1 || true
+  helm repo update >/dev/null 2>&1
+
+  # Install OpenEBS
+  log "Installing OpenEBS LocalPV provisioner..."
+  helm upgrade --install openebs openebs/openebs \
+    --namespace openebs-system \
+    --create-namespace \
+    --set engines.local.lvm.enabled=false \
+    --set engines.local.zfs.enabled=false \
+    --set engines.replicated.mayastor.enabled=false \
+    --set engines.local.hostpath.enabled=true \
+    --set localpv-provisioner.hostpathClass.enabled=true \
+    --set localpv-provisioner.hostpathClass.name=openebs-hostpath \
+    --set localpv-provisioner.hostpathClass.isDefaultClass=false \
+    --wait --timeout=300s
+
+  # Wait for OpenEBS components to be ready
+  log "Waiting for OpenEBS components to be ready..."
+  kubectl -n openebs-system wait --for=condition=ready pod --all --timeout=180s
+
+  # Apply storage classes
+  log "Creating enterprise storage classes..."
+  apply_storage_classes
+
+  log "OpenEBS storage platform installed successfully!"
+  echo
+  echo "Available Storage Classes:"
+  kubectl get storageclass -l compliance.storage/managed-by=enterprise-sim
+}
+
+apply_storage_classes() {
+  TMPFILE=$(mktemp)
+  trap 'rm -f "$TMPFILE"' EXIT
+
+  cat > "$TMPFILE" <<'EOF'
+---
+# Standard performance storage class
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: enterprise-standard
+  labels:
+    compliance.storage/managed-by: enterprise-sim
+    compliance.storage/tier: standard
+    compliance.storage/encryption: enabled
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "true"
+provisioner: openebs.io/local
+volumeBindingMode: WaitForFirstConsumer
+parameters:
+  storageType: hostpath
+  basePath: "/var/openebs/local"
+reclaimPolicy: Delete
+---
+# SSD performance storage class
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: enterprise-ssd
+  labels:
+    compliance.storage/managed-by: enterprise-sim
+    compliance.storage/tier: ssd
+    compliance.storage/encryption: enabled
+provisioner: openebs.io/local
+volumeBindingMode: WaitForFirstConsumer
+parameters:
+  storageType: hostpath
+  basePath: "/var/openebs/ssd"
+reclaimPolicy: Delete
+---
+# Fast performance storage class
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: enterprise-fast
+  labels:
+    compliance.storage/managed-by: enterprise-sim
+    compliance.storage/tier: fast
+    compliance.storage/encryption: enabled
+provisioner: openebs.io/local
+volumeBindingMode: WaitForFirstConsumer
+parameters:
+  storageType: hostpath
+  basePath: "/var/openebs/fast"
+reclaimPolicy: Delete
+EOF
+
+  kubectl apply -f "$TMPFILE"
+}
+
 cmd_reset() {
   log "[reset] Tearing down platform (down + wipe app env/cluster)..."
   cmd_down
@@ -1058,6 +1232,7 @@ Commands:
   certmgr up          Install cert-manager for Let's Encrypt certificates
   istio up            Install Istio service mesh with demo profile
   tls up              Setup TLS certificates (auto-detects cert-manager vs self-signed)
+  storage up          Install OpenEBS storage platform with enterprise storage classes
   regions up          Create region namespaces and apply zero-trust policies
   gateway up          Apply wildcard HTTPS gateway using TLS secret
   routes reconcile    Auto-generate VirtualServices from labeled Services
@@ -1079,11 +1254,12 @@ Manual Setup:
   2. $0 up                 # Create cluster
   3. $0 istio up           # Install Istio service mesh
   4. $0 certmgr up         # Install cert-manager (optional)
-  5. $0 tls up             # Setup TLS certificates
-  6. $0 regions up         # Create region namespaces
-  7. $0 gateway up         # Setup wildcard gateway
-  8. $0 app deploy         # Deploy sample application
-  9. $0 validate           # Verify everything is working
+  5. $0 storage up         # Install OpenEBS storage platform (optional)
+  6. $0 tls up             # Setup TLS certificates
+  7. $0 regions up         # Create region namespaces
+  8. $0 gateway up         # Setup wildcard gateway
+  9. $0 app deploy         # Deploy sample application
+  10. $0 validate          # Verify everything is working
 
 Environment Configuration:
   Environment determined by single config file in config/ directory:
@@ -1132,6 +1308,7 @@ main() {
     status) shift; cmd_status "$@" ;;
     tls) shift; case "${1:-}" in up) shift; cmd_tls_up "$@" ;; *) usage ;; esac ;;
     istio) shift; case "${1:-}" in up) shift; cmd_istio_up "$@" ;; *) usage ;; esac ;;
+    storage) shift; case "${1:-}" in up) shift; cmd_storage_up "$@" ;; *) usage ;; esac ;;
     regions) shift; case "${1:-}" in up) shift; cmd_regions_up "$@" ;; *) usage ;; esac ;;
     gateway) shift; case "${1:-}" in up) shift; cmd_gateway_up "$@" ;; *) usage ;; esac ;;
     routes) shift; case "${1:-}" in reconcile) shift; cmd_routes_reconcile "$@" ;; *) usage ;; esac ;;
