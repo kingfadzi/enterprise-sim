@@ -1,0 +1,36 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - deployment.yaml
+  - service.yaml
+  - destinationrule.yaml
+
+generatorOptions:
+  disableNameSuffixHash: true
+
+configMapGenerator:
+  - name: sample-app-env
+    envs:
+      - .env  # App-only variables (APP_NAME, REGION)
+
+# App variables (from ConfigMap - visible to app)
+vars:
+  - name: APP_NAME
+    objref:
+      apiVersion: v1
+      kind: ConfigMap
+      name: sample-app-env
+    fieldref:
+      fieldpath: data.APP_NAME
+  - name: REGION
+    objref:
+      apiVersion: v1
+      kind: ConfigMap
+      name: sample-app-env
+    fieldref:
+      fieldpath: data.REGION
+
+# Platform variables (from environment - not visible to app)
+# NAMESPACE, ROUTE_HOST, K3S_INGRESS_DOMAIN, GATEWAY_NAME exported by platform script
+configurations:
+  - kustomizeconfig.yaml

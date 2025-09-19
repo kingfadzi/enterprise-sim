@@ -1,0 +1,135 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${APP_NAME}
+  namespace: ${NAMESPACE}
+  labels:
+    app: ${APP_NAME}
+    version: v1
+    compliance.region: ${REGION}
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ${APP_NAME}
+      version: v1
+  template:
+    metadata:
+      labels:
+        app: ${APP_NAME}
+        version: v1
+        compliance.region: ${REGION}
+      annotations:
+        # Istio sidecar injection (automatic in labeled namespaces)
+        sidecar.istio.io/inject: "true"
+        # Security annotations disabled for k3d compatibility
+        # container.apparmor.security.beta.kubernetes.io/hello-app: runtime/default
+    spec:
+      serviceAccountName: default
+      securityContext:
+        # Pod-level security context - relaxed for k3d demo
+        # runAsNonRoot: true
+        # runAsUser: 1000
+        # runAsGroup: 1000
+        # fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: hello-app
+        # Replace with your actual image
+        image: python:3.11-slim
+        imagePullPolicy: Always
+        command: ["/bin/sh"]
+        args:
+        - -c
+        - |
+          cat > app.py << 'EOF'
+          #!/usr/bin/env python3
+          import os
+          import json
+          from datetime import datetime
+          from http.server import HTTPServer, BaseHTTPRequestHandler
+
+          APP_NAME = os.getenv("APP_NAME", "hello-app")
+          REGION = os.getenv("REGION", "us")
+
+          class SimpleHandler(BaseHTTPRequestHandler):
+              def do_GET(self):
+                  if self.path == '/':
+                      response = {
+                          'message': 'Hello from compliance-ready HTTP service!',
+                          'service': APP_NAME,
+                          'region': REGION,
+                          'timestamp': datetime.utcnow().isoformat() + 'Z',
+                          'headers': dict(self.headers),
+                          'method': 'GET'
+                      }
+                  elif self.path == '/health':
+                      response = {'status': 'healthy', 'service': APP_NAME}
+                  elif self.path == '/ready':
+                      response = {'status': 'ready', 'service': APP_NAME}
+                  else:
+                      self.send_response(404)
+                      self.end_headers()
+                      return
+
+                  self.send_response(200)
+                  self.send_header('Content-Type', 'application/json')
+                  self.end_headers()
+                  self.wfile.write(json.dumps(response).encode())
+
+              def log_message(self, format, *args):
+                  print(f"{datetime.utcnow().isoformat()}Z - {format % args}")
+
+          if __name__ == '__main__':
+              server = HTTPServer(('0.0.0.0', 8080), SimpleHandler)
+              print(f"Starting HTTP server on port 8080...")
+              print(f"Service: {APP_NAME}, Region: {REGION}")
+              server.serve_forever()
+          EOF
+          python app.py
+        ports:
+        - name: http
+          containerPort: 8080
+          protocol: TCP
+        securityContext:
+          # Container-level security context - relaxed for k3d demo
+          allowPrivilegeEscalation: false
+          # runAsNonRoot: true
+          # runAsUser: 1000
+          # runAsGroup: 1000
+          readOnlyRootFilesystem: false  # Flask needs to write temp files for certs
+          capabilities:
+            drop:
+            - ALL
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+            scheme: HTTP
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8080
+            scheme: HTTP
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+        envFrom:
+        - configMapRef:
+            name: sample-app-env
+        env:
+        - name: NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
