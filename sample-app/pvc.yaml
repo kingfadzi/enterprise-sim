@@ -5,15 +5,15 @@ metadata:
   namespace: ${NAMESPACE}
   labels:
     app: ${APP_NAME}
-    compliance.storage/managed-by: enterprise-sim
-    compliance.storage/backup: enabled
+    "compliance.storage/managed-by": enterprise-sim
+    "compliance.storage/backup": enabled
   annotations:
-    compliance.storage/tier: ${STORAGE_PERSISTENT_CLASS}
-    compliance.storage/size: ${STORAGE_PERSISTENT_SIZE}
+    "compliance.storage/tier": "${STORAGE_PERSISTENT_CLASS}"
+    "compliance.storage/size": "${STORAGE_PERSISTENT_SIZE}"
 spec:
   accessModes:
     - ReadWriteOnce
   resources:
     requests:
-      storage: ${STORAGE_PERSISTENT_SIZE}
-  storageClassName: ${STORAGE_PERSISTENT_CLASS}
+      storage: "${STORAGE_PERSISTENT_SIZE}"
+  storageClassName: "${STORAGE_PERSISTENT_CLASS}"

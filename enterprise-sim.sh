@@ -282,6 +282,11 @@ generate_sample_app_env() {
   : "${APP_NAME:=hello-app}"
   : "${REGION:=us}"
 
+  # Set storage defaults
+  : "${STORAGE_PERSISTENT_ENABLED:=false}"
+  : "${STORAGE_PERSISTENT_SIZE:=1Gi}"
+  : "${STORAGE_PERSISTENT_CLASS:=enterprise-standard}"
+
   # Platform computes all infrastructure values
   require_domain
   derive_env_defaults

@@ -6,7 +6,7 @@ metadata:
   labels:
     app: ${APP_NAME}
     version: v1
-    compliance.region: ${REGION}
+    "compliance.region": "${REGION}"
 spec:
   replicas: 2
   selector:
@@ -18,209 +18,69 @@ spec:
       labels:
         app: ${APP_NAME}
         version: v1
-        compliance.region: ${REGION}
+        "compliance.region": "${REGION}"
       annotations:
         # Istio sidecar injection (automatic in labeled namespaces)
         sidecar.istio.io/inject: "true"
-        # Security annotations disabled for k3d compatibility
-        # container.apparmor.security.beta.kubernetes.io/hello-app: runtime/default
+        # Prometheus metrics scraping
+        "prometheus.io/scrape": "true"
+        "prometheus.io/port": "8080"
+        "prometheus.io/path": "/api/health"
     spec:
       serviceAccountName: default
       securityContext:
         # Pod-level security context - relaxed for k3d demo
-        # runAsNonRoot: true
-        # runAsUser: 1000
-        # runAsGroup: 1000
-        # fsGroup: 1000
         seccompProfile:
           type: RuntimeDefault
       containers:
-      - name: hello-app
-        # Replace with your actual image
-        image: python:3.11-slim
-        imagePullPolicy: Always
-        command: ["/bin/sh"]
-        args:
-        - -c
-        - |
-          cat > app.py << 'EOF'
-          #!/usr/bin/env python3
-          import os
-          import json
-          import socket
-          import subprocess
-          from datetime import datetime
-          from http.server import HTTPServer, BaseHTTPRequestHandler
-
-          APP_NAME = os.getenv("APP_NAME", "hello-app")
-          REGION = os.getenv("REGION", "us")
-          NAMESPACE = os.getenv("NAMESPACE", "default")
-
-          def check_storage_mounted():
-              """Check if persistent storage is mounted and accessible"""
-              storage_path = "/app/data"
-              try:
-                  if os.path.exists(storage_path) and os.path.ismount(storage_path):
-                      # Try to write a test file
-                      test_file = os.path.join(storage_path, ".storage_test")
-                      with open(test_file, 'w') as f:
-                          f.write("test")
-                      os.remove(test_file)
-                      return {
-                          "enabled": True,
-                          "path": storage_path,
-                          "writable": True,
-                          "type": "persistent"
-                      }
-                  elif os.path.exists(storage_path):
-                      return {
-                          "enabled": True,
-                          "path": storage_path,
-                          "writable": os.access(storage_path, os.W_OK),
-                          "type": "persistent"
-                      }
-                  else:
-                      return {"enabled": False, "type": "ephemeral"}
-              except Exception as e:
-                  return {"enabled": False, "error": str(e), "type": "ephemeral"}
-
-          def get_security_context():
-              """Get current security context information"""
-              try:
-                  uid = os.getuid()
-                  gid = os.getgid()
-                  return {
-                      "user_id": uid,
-                      "group_id": gid,
-                      "running_as_root": uid == 0,
-                      "capabilities_dropped": True,  # Based on deployment securityContext
-                      "read_only_root_fs": False,    # Based on deployment config
-                      "privilege_escalation": False  # Based on deployment config
-                  }
-              except Exception as e:
-                  return {"error": str(e)}
-
-          def get_network_posture():
-              """Get network security posture"""
-              return {
-                  "istio_sidecar": os.path.exists("/etc/istio/proxy"),
-                  "mtls_enabled": True,  # Enforced by PeerAuthentication
-                  "zero_trust_policies": True,  # Enforced by AuthorizationPolicy
-                  "network_policies": True,  # Enforced by NetworkPolicy
-                  "ingress_gateway": "istio-ingressgateway",
-                  "service_mesh": "istio"
-              }
-
-          def get_platform_posture():
-              """Get overall platform security posture"""
-              storage_info = check_storage_mounted()
-              security_ctx = get_security_context()
-              network_info = get_network_posture()
-
-              return {
-                  "service": APP_NAME,
-                  "region": REGION,
-                  "namespace": NAMESPACE,
-                  "compliance_tier": "enterprise",
-                  "encryption": {
-                      "in_transit": True,  # TLS + mTLS
-                      "at_rest": storage_info.get("enabled", False),
-                      "service_mesh": True  # Istio mTLS
-                  },
-                  "storage": storage_info,
-                  "security": {
-                      "context": security_ctx,
-                      "network": network_info,
-                      "container_security": {
-                          "seccomp_profile": "RuntimeDefault",
-                          "security_context_constraints": True,
-                          "image_pull_policy": "Always"
-                      }
-                  },
-                  "observability": {
-                      "metrics": True,  # Prometheus scraping enabled
-                      "tracing": True,  # Istio tracing
-                      "logging": True   # Container logs
-                  },
-                  "governance": {
-                      "compliance_labels": True,
-                      "backup_enabled": storage_info.get("enabled", False),
-                      "audit_logging": True
-                  }
-              }
-
-          class SimpleHandler(BaseHTTPRequestHandler):
-              def do_GET(self):
-                  if self.path == '/':
-                      response = {
-                          'message': 'Hello from compliance-ready HTTP service!',
-                          'service': APP_NAME,
-                          'region': REGION,
-                          'namespace': NAMESPACE,
-                          'timestamp': datetime.utcnow().isoformat() + 'Z',
-                          'headers': dict(self.headers),
-                          'method': 'GET'
-                      }
-                  elif self.path == '/health':
-                      response = {'status': 'healthy', 'service': APP_NAME}
-                  elif self.path == '/ready':
-                      response = {'status': 'ready', 'service': APP_NAME}
-                  elif self.path == '/posture':
-                      response = get_platform_posture()
-                  elif self.path == '/security':
-                      response = {
-                          'service': APP_NAME,
-                          'security_posture': get_security_context(),
-                          'network_security': get_network_posture(),
-                          'timestamp': datetime.utcnow().isoformat() + 'Z'
-                      }
-                  elif self.path == '/storage':
-                      response = {
-                          'service': APP_NAME,
-                          'storage_info': check_storage_mounted(),
-                          'timestamp': datetime.utcnow().isoformat() + 'Z'
-                      }
-                  else:
-                      self.send_response(404)
-                      self.end_headers()
-                      return
-
-                  self.send_response(200)
-                  self.send_header('Content-Type', 'application/json')
-                  self.end_headers()
-                  self.wfile.write(json.dumps(response, indent=2).encode())
-
-              def log_message(self, format, *args):
-                  print(f"{datetime.utcnow().isoformat()}Z - {format % args}")
-
-          if __name__ == '__main__':
-              server = HTTPServer(('0.0.0.0', 8080), SimpleHandler)
-              print(f"Starting HTTP server on port 8080...")
-              print(f"Service: {APP_NAME}, Region: {REGION}, Namespace: {NAMESPACE}")
-              print("Available endpoints:")
-              print("  /         - Basic service info")
-              print("  /health   - Health check")
-              print("  /ready    - Readiness check")
-              print("  /posture  - Complete security & compliance posture")
-              print("  /security - Security context details")
-              print("  /storage  - Storage configuration")
-              server.serve_forever()
-          EOF
-          python app.py
+      - name: ${APP_NAME}
+        # Use the multi-stage built image
+        image: ${APP_NAME}:latest
+        imagePullPolicy: Never
         ports:
         - name: http
           containerPort: 8080
           protocol: TCP
+        env:
+        - name: APP_NAME
+          value: "${APP_NAME}"
+        - name: REGION
+          value: "${REGION}"
+        - name: NAMESPACE
+          value: "${NAMESPACE}"
+        # Health and readiness probes using new API endpoints
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: http
+            scheme: HTTP
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /api/ready
+            port: http
+            scheme: HTTP
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        # Container security context
         securityContext:
-          # Container-level security context - relaxed for k3d demo
+          # Run as non-root user (created in Dockerfile)
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          readOnlyRootFilesystem: false  # Flask needs to write temp files
           allowPrivilegeEscalation: false
-          # runAsNonRoot: true
-          # runAsUser: 1000
-          # runAsGroup: 1000
-          readOnlyRootFilesystem: false  # Flask needs to write temp files for certs
           capabilities:
             drop:
             - ALL
+            add:
+            - NET_BIND_SERVICE  # Allow binding to port 8080
+        # Resource limits for production
         resources:
           requests:
             memory: "128Mi"
@@ -228,27 +88,3 @@ spec:
           limits:
             memory: "256Mi"
             cpu: "200m"
-        livenessProbe:
-          httpGet:
-            path: /health
-            port: 8080
-            scheme: HTTP
-          initialDelaySeconds: 10
-          periodSeconds: 10
-          timeoutSeconds: 5
-        readinessProbe:
-          httpGet:
-            path: /ready
-            port: 8080
-            scheme: HTTP
-          initialDelaySeconds: 5
-          periodSeconds: 5
-          timeoutSeconds: 3
-        envFrom:
-        - configMapRef:
-            name: sample-app-env
-        env:
-        - name: NAMESPACE
-          valueFrom:
-            fieldRef:
-              fieldPath: metadata.namespace
