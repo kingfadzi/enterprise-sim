@@ -1,0 +1,41 @@
+cluster:
+  name: enterprise-sim
+  workers: 3
+  registry_port: 5000
+  api_port: 6443
+  ingress_http_port: 8090    # Changed from 8080 (Rancher conflict)
+  ingress_https_port: 8453   # Changed from 8443 (Rancher conflict)
+  volume_mounts: []
+
+services:
+  istio:
+    enabled: true
+    version: "1.19.0"
+    config: {}
+
+  cert-manager:
+    enabled: true
+    version: "v1.13.0"
+    config: {}
+
+  storage:
+    enabled: true
+    version: "latest"
+    config: {}
+
+  minio:
+    enabled: true
+    version: "7.1.1"
+    config:
+      storage_size: "10Gi"
+      replicas: 1
+
+  sample-app:
+    enabled: true
+    version: "latest"
+    config:
+      app_name: "hello-app"
+      region: "us"
+
+environment:
+  domain: "prod.butterflycluster.com"
