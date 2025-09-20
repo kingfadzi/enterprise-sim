@@ -130,6 +130,10 @@ class KubernetesClient:
             print(f"Failed to create namespace {namespace}: {stderr}")
             return False
 
+    def ensure_namespace(self, namespace: str) -> bool:
+        """Ensure a namespace exists (create if missing)."""
+        return self.create_namespace(namespace)
+
     def label_namespace(self, namespace: str, labels: Dict[str, str]) -> bool:
         """Add labels to namespace."""
         try:

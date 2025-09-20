@@ -64,6 +64,23 @@ class EnterpriseSimCLI:
             print(f"Failed to initialize: {e}")
             sys.exit(1)
 
+    def _derive_env_from_domain(self, domain: str) -> str:
+        """Derive environment name from a domain like 'prod.example.com'.
+
+        Returns 'local' for localhost or single-label domains.
+        """
+        if not domain or domain in ("localhost", "127.0.0.1"):
+            return "local"
+        parts = domain.split('.')
+        if len(parts) < 2:
+            return "local"
+        return parts[0]
+
+    def _compute_tls_secret_name(self, domain: str) -> str:
+        """Mirror bash naming: {env}-wildcard-tls."""
+        env = self._derive_env_from_domain(domain)
+        return f"{env}-wildcard-tls"
+
     def create_cluster(self, args):
         """Create k3d cluster."""
         self._initialize(args.config)
@@ -447,6 +464,7 @@ class EnterpriseSimCLI:
         # Update cert manager with domain
         self.cert_manager.domain = domain
         self.cert_manager.wildcard_domain = f"*.{domain}"
+        # Use original domain-based naming (e.g., prod-butterflycluster-com-tls)
         self.cert_manager.secret_name = f"{domain.replace('.', '-')}-tls"
 
         print(f"Setting up TLS certificates for domain: {domain}")
@@ -632,7 +650,7 @@ class EnterpriseSimCLI:
 
             print(f"Installing services: {', '.join(enabled_services)}")
 
-            # Install cert-manager first and setup certificates
+            # Install cert-manager first if enabled
             if 'cert-manager' in enabled_services:
                 print(f"\nInstalling cert-manager...")
                 if not service_registry.install_services(['cert-manager']):
@@ -640,34 +658,34 @@ class EnterpriseSimCLI:
                     return False
                 print(f"SUCCESS: cert-manager installed successfully")
 
-                # Setup certificates immediately after cert-manager
-                print("Setting up SSL certificates for all services...")
-                domain = self.config_manager.config.environment.get('domain', 'localhost')
-
-                # Determine certificate mode based on domain and CloudFlare credentials
-                if domain == 'localhost':
-                    cert_mode = 'self-signed'
-                elif self.cert_manager._has_cloudflare_credentials():
-                    cert_mode = 'letsencrypt'
-                else:
-                    cert_mode = 'self-signed'
-                    print("WARNING: No CloudFlare credentials found, using self-signed certificates")
-
-                cert_staging = not getattr(args, 'prod', False)
-
-                # Update cert manager with correct domain configuration
-                self.cert_manager.domain = domain
-                self.cert_manager.wildcard_domain = f"*.{domain}"
-                self.cert_manager.secret_name = f"{domain.replace('.', '-')}-tls"
-
-                if not self.cert_manager.setup_certificates(cert_mode, cert_staging):
-                    print("ERROR: Certificate setup failed")
-                    return False
-                else:
-                    print("SUCCESS: SSL certificates configured")
-
                 # Remove cert-manager from the list since it's already installed
                 enabled_services = [s for s in enabled_services if s != 'cert-manager']
+
+            # Always setup certificates before installing other services
+            print("Setting up SSL certificates for all services...")
+            domain = self.config_manager.config.environment.get('domain', 'localhost')
+
+            # Determine certificate mode based on domain and CloudFlare credentials
+            if domain == 'localhost':
+                cert_mode = 'self-signed'
+            elif self.cert_manager._has_cloudflare_credentials():
+                cert_mode = 'letsencrypt'
+            else:
+                cert_mode = 'self-signed'
+                print("WARNING: No CloudFlare credentials found, using self-signed certificates")
+
+            cert_staging = not getattr(args, 'prod', False)
+
+            # Update cert manager with correct domain configuration
+            self.cert_manager.domain = domain
+            self.cert_manager.wildcard_domain = f"*.{domain}"
+            self.cert_manager.secret_name = f"{domain.replace('.', '-')}-tls"
+
+            if not self.cert_manager.setup_certificates(cert_mode, cert_staging):
+                print("ERROR: Certificate setup failed")
+                return False
+            else:
+                print("SUCCESS: SSL certificates configured")
 
             # Install remaining services in correct dependency order
             if enabled_services:
@@ -691,6 +709,22 @@ class EnterpriseSimCLI:
                         return False
                     print(f"SUCCESS: {service_name} installed successfully")
 
+                    # After istio is installed, create shared gateway
+                    if service_name == 'istio':
+                        print("Creating shared security gateway...")
+
+                        # Update gateway manager with correct domain
+                        domain = self.config_manager.config.environment.get('domain', 'localhost')
+                        self.gateway_manager.domain = domain
+                        self.gateway_manager.wildcard_domain = f"*.{domain}"
+                        self.gateway_manager.gateway_name = f"{domain.replace('.', '-')}-gateway"
+                        self.gateway_manager.secret_name = f"{domain.replace('.', '-')}-tls"
+
+                        if not self.gateway_manager.create_wildcard_gateway():
+                            print("WARNING: Gateway creation encountered issues")
+                        else:
+                            print("SUCCESS: Shared gateway configured")
+
                 print("SUCCESS: All services installed")
 
             # Step 3: Security and routing setup
@@ -699,12 +733,7 @@ class EnterpriseSimCLI:
 
             domain = self.config_manager.config.environment.get('domain', 'localhost')
 
-            # Setup gateway
-            print("Setting up security gateway...")
-            if not self.gateway_manager.setup_wildcard_gateway(domain=domain):
-                print("WARNING: Gateway setup encountered issues")
-            else:
-                print("SUCCESS: Security gateway configured")
+            print("Security gateway already configured after istio installation")
 
             # Step 4: Validation
             print("\nStep 4: Validation")

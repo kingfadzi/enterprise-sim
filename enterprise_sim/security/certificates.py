@@ -246,11 +246,14 @@ spec:
         """Create Certificate resource for Let's Encrypt."""
         env_name = "staging" if staging else "prod"
 
+        # Ensure target namespace exists before applying
+        self.k8s.create_namespace('istio-system')
+
         certificate_manifest = f"""apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
   name: {self.secret_name}
-  namespace: cert-manager
+  namespace: istio-system
 spec:
   secretName: {self.secret_name}
   issuerRef:
@@ -266,7 +269,7 @@ spec:
             print("ERROR: Certificate manifest has invalid YAML syntax")
             return False
 
-        if not self.k8s.apply_manifest(certificate_manifest, 'cert-manager'):
+        if not self.k8s.apply_manifest(certificate_manifest, 'istio-system'):
             print("ERROR: Failed to create Certificate resource")
             return False
 
@@ -282,7 +285,7 @@ spec:
 
         while time.time() - start_time < timeout:
             try:
-                cert = self.k8s.get_resource('certificate', self.secret_name, 'cert-manager')
+                cert = self.k8s.get_resource('certificate', self.secret_name, 'istio-system')
                 if cert:
                     status = cert.get('status', {})
                     conditions = status.get('conditions', [])
@@ -329,14 +332,14 @@ spec:
 
         # Final status check
         try:
-            cert = self.k8s.get_resource('certificate', self.secret_name, 'cert-manager')
+            cert = self.k8s.get_resource('certificate', self.secret_name, 'istio-system')
             if cert:
                 status = cert.get('status', {})
                 print("Final certificate status:")
                 print(f"  Conditions: {status.get('conditions', [])}")
 
                 # Check for CertificateRequest
-                cert_requests = self.k8s.get_resource('certificaterequests', namespace='cert-manager')
+                cert_requests = self.k8s.get_resource('certificaterequests', namespace='istio-system')
                 if cert_requests:
                     print("Related CertificateRequests:")
                     for cr in cert_requests.get('items', []):
@@ -363,14 +366,17 @@ spec:
 kind: Secret
 metadata:
   name: {self.secret_name}
-  namespace: cert-manager
+  namespace: istio-system
 type: kubernetes.io/tls
 data:
   tls.crt: {cert_b64}
   tls.key: {key_b64}
 """
 
-        if self.k8s.apply_manifest(secret_manifest, 'cert-manager'):
+        # Ensure istio-system namespace exists
+        self.k8s.ensure_namespace('istio-system')
+
+        if self.k8s.apply_manifest(secret_manifest, 'istio-system'):
             print(f"TLS secret created: {self.secret_name}")
             # Backup the certificate
             self._backup_certificate()
@@ -382,7 +388,7 @@ data:
     def get_certificate_info(self) -> Optional[Dict]:
         """Get information about the current certificate."""
         try:
-            secret = self.k8s.get_resource('secret', self.secret_name, 'cert-manager')
+            secret = self.k8s.get_resource('secret', self.secret_name, 'istio-system')
             if not secret:
                 return None
 
@@ -409,7 +415,7 @@ data:
                 cert_text = result.stdout
                 info = self._parse_certificate_info(cert_text)
                 info['secret_name'] = self.secret_name
-                info['namespace'] = 'cert-manager'
+                info['namespace'] = 'istio-system'
 
                 return info
 
@@ -477,27 +483,27 @@ data:
 
         try:
             # Delete TLS secret
-            if self.k8s.get_resource('secret', self.secret_name, 'cert-manager'):
+            if self.k8s.get_resource('secret', self.secret_name, 'istio-system'):
                 secret_manifest = f"""
 apiVersion: v1
 kind: Secret
 metadata:
   name: {self.secret_name}
-  namespace: cert-manager
+  namespace: istio-system
 """
-                self.k8s.delete_manifest(secret_manifest, 'cert-manager')
+                self.k8s.delete_manifest(secret_manifest, 'istio-system')
                 print(f"TLS secret deleted: {self.secret_name}")
 
             # Delete Certificate resource if using Let's Encrypt
-            if self.k8s.get_resource('certificate', self.secret_name, 'cert-manager'):
+            if self.k8s.get_resource('certificate', self.secret_name, 'istio-system'):
                 cert_manifest = f"""
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
   name: {self.secret_name}
-  namespace: cert-manager
+  namespace: istio-system
 """
-                self.k8s.delete_manifest(cert_manifest, 'cert-manager')
+                self.k8s.delete_manifest(cert_manifest, 'istio-system')
                 print(f"Certificate resource deleted: {self.secret_name}")
 
             return True
@@ -588,12 +594,15 @@ spec:
 
         print(f"Creating Certificate resource: {cert_name}")
 
+        # Ensure target namespace exists before applying
+        self.k8s.create_namespace('istio-system')
+
         certificate_manifest = f"""
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
   name: {cert_name}
-  namespace: cert-manager
+  namespace: istio-system
 spec:
   secretName: {self.secret_name}
   issuerRef:
@@ -603,7 +612,7 @@ spec:
   - {self.domain}
   - "*.{self.domain}"
 """
-        if not self.k8s.apply_manifest(certificate_manifest, 'cert-manager'):
+        if not self.k8s.apply_manifest(certificate_manifest, 'istio-system'):
             print("ERROR: Failed to create Certificate resource")
             return False
 
@@ -621,7 +630,7 @@ spec:
         start_time = time.time()
         while time.time() - start_time < timeout:
             try:
-                cert = self.k8s.get_resource('certificate', cert_name, 'cert-manager')
+                cert = self.k8s.get_resource('certificate', cert_name, 'istio-system')
                 if cert and cert.get('status', {}).get('conditions'):
                     for condition in cert['status']['conditions']:
                         if condition.get('type') == 'Ready' and condition.get('status') == 'True':
@@ -653,7 +662,7 @@ spec:
             os.makedirs(backup_dir, exist_ok=True)
 
             # Check if secret exists
-            secret = self.k8s.get_resource('secret', self.secret_name, 'cert-manager')
+            secret = self.k8s.get_resource('secret', self.secret_name, 'istio-system')
             if not secret:
                 print(f"WARNING: Secret {self.secret_name} not found for backup")
                 return False
@@ -661,7 +670,7 @@ spec:
             # Export secret to YAML file
             cmd = [
                 'kubectl', 'get', 'secret', self.secret_name,
-                '-n', 'cert-manager', '-o', 'yaml'
+                '-n', 'istio-system', '-o', 'yaml'
             ]
 
             with open(backup_file, 'w') as f:
@@ -682,7 +691,7 @@ spec:
         """Check if certificate exists in cluster and is valid for at least 7 days."""
         try:
             # Check if secret exists in cert-manager namespace
-            secret = self.k8s.get_resource('secret', self.secret_name, 'cert-manager')
+            secret = self.k8s.get_resource('secret', self.secret_name, 'istio-system')
             if not secret:
                 return False
 
