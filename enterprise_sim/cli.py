@@ -6,6 +6,7 @@ from typing import Optional
 
 from .core.config import ConfigManager
 from .core.cluster import ClusterManager
+from .core.regions import RegionManager
 from .core.validation import ServiceValidator
 from .utils.k8s import KubernetesClient, HelmClient
 from .services import service_registry, IstioService, CertManagerService, OpenEBSService, MinioService, SampleAppService
@@ -24,21 +25,25 @@ class EnterpriseSimCLI:
         self.cert_manager: Optional[CertificateManager] = None
         self.policy_manager: Optional[PolicyManager] = None
         self.gateway_manager: Optional[GatewayManager] = None
+        self.region_manager: Optional[RegionManager] = None
 
     def _initialize(self, config_file: Optional[str] = None):
         """Initialize managers and clients."""
         try:
             self.config_manager = ConfigManager(config_file)
+            self.config_manager.validate_config()  # Validate config early
+
             cluster_config = self.config_manager.get_cluster_config()
             self.cluster_manager = ClusterManager(cluster_config)
             self.k8s_client = KubernetesClient()
             self.helm_client = HelmClient()
             self.validator = ServiceValidator(self.k8s_client)
 
-            # Initialize security managers
+            # Initialize managers
             self.cert_manager = CertificateManager(self.k8s_client)
             self.policy_manager = PolicyManager(self.k8s_client)
             self.gateway_manager = GatewayManager(self.k8s_client)
+            self.region_manager = RegionManager(self.k8s_client)
 
             # Register services
             service_registry.register(IstioService)
@@ -81,9 +86,21 @@ class EnterpriseSimCLI:
         env = self._derive_env_from_domain(domain)
         return f"{env}-wildcard-tls"
 
+    def _cleanup_env_files(self):
+        """Remove generated environment files."""
+        import os
+        env_file = 'sample-app/.env'
+        if os.path.exists(env_file):
+            try:
+                os.remove(env_file)
+                print(f"Removed {env_file}")
+            except OSError as e:
+                print(f"Error removing {env_file}: {e}")
+        else:
+            print(f"{env_file} not found, skipping cleanup.")
+
     def create_cluster(self, args):
         """Create k3d cluster."""
-        self._initialize(args.config)
 
         print("Creating enterprise simulation cluster...")
         print("=" * 50)
@@ -145,7 +162,6 @@ class EnterpriseSimCLI:
 
     def delete_cluster(self, args):
         """Delete k3d cluster."""
-        self._initialize(args.config)
 
         if not args.force:
             cluster_name = self.config_manager.get_cluster_config().name
@@ -164,7 +180,6 @@ class EnterpriseSimCLI:
 
     def start_cluster(self, args):
         """Start existing cluster."""
-        self._initialize(args.config)
 
         print("Starting enterprise simulation cluster...")
         if self.cluster_manager.start():
@@ -177,7 +192,6 @@ class EnterpriseSimCLI:
 
     def stop_cluster(self, args):
         """Stop running cluster."""
-        self._initialize(args.config)
 
         print("Stopping enterprise simulation cluster...")
         if self.cluster_manager.stop():
@@ -189,7 +203,6 @@ class EnterpriseSimCLI:
 
     def status(self, args):
         """Show cluster and services status."""
-        self._initialize(args.config)
 
         # Cluster status
         status = self.cluster_manager.get_status()
@@ -232,7 +245,6 @@ class EnterpriseSimCLI:
 
     def config_show(self, args):
         """Show current configuration."""
-        self._initialize(args.config)
 
         print("Current Configuration:")
         print(f"Cluster: {self.config_manager.config.cluster.name}")
@@ -250,7 +262,6 @@ class EnterpriseSimCLI:
 
     def validate(self, args):
         """Validate cluster and services."""
-        self._initialize(args.config)
 
         print("Validating enterprise simulation environment...")
 
@@ -269,7 +280,6 @@ class EnterpriseSimCLI:
 
     def install_services(self, args):
         """Install services."""
-        self._initialize(args.config)
 
         services_to_install = args.services if args.services else list(self.config_manager.config.services.keys())
         enabled_services = [s for s in services_to_install if self.config_manager.is_service_enabled(s)]
@@ -305,7 +315,6 @@ class EnterpriseSimCLI:
 
     def uninstall_services(self, args):
         """Uninstall services."""
-        self._initialize(args.config)
 
         services_to_uninstall = args.services if args.services else list(self.config_manager.config.services.keys())
 
@@ -324,7 +333,6 @@ class EnterpriseSimCLI:
 
     def service_status(self, args):
         """Show service status."""
-        self._initialize(args.config)
 
         print("Service Status:")
         print("=" * 50)
@@ -353,7 +361,6 @@ class EnterpriseSimCLI:
 
     def validate_services(self, args):
         """Validate services."""
-        self._initialize(args.config)
 
         print("Validating Enterprise Simulation Environment")
         print("=" * 60)
@@ -454,7 +461,6 @@ class EnterpriseSimCLI:
 
     def setup_certificates(self, args):
         """Setup TLS certificates."""
-        self._initialize(args.config)
 
         mode = getattr(args, 'mode', 'self-signed')
         domain = getattr(args, 'domain', 'localhost')
@@ -481,7 +487,6 @@ class EnterpriseSimCLI:
 
     def setup_regions(self, args):
         """Setup regions with zero-trust policies."""
-        self._initialize(args.config)
 
         regions = args.regions or ['us', 'eu', 'ap']
         print(f"Setting up regions with zero-trust policies: {', '.join(regions)}")
@@ -496,7 +501,6 @@ class EnterpriseSimCLI:
 
     def setup_gateway(self, args):
         """Setup wildcard ingress gateway."""
-        self._initialize(args.config)
 
         domain = getattr(args, 'domain', 'localhost')
 
@@ -517,7 +521,6 @@ class EnterpriseSimCLI:
 
     def security_status(self, args):
         """Show security status."""
-        self._initialize(args.config)
 
         print("Security Status:")
         print("=" * 50)
@@ -557,7 +560,6 @@ class EnterpriseSimCLI:
 
     def validate_security(self, args):
         """Validate security configuration."""
-        self._initialize(args.config)
 
         print("Validating security configuration...")
         print("=" * 50)
@@ -603,26 +605,6 @@ class EnterpriseSimCLI:
 
     def full_up(self, args):
         """Install complete enterprise platform (orchestration command)."""
-        print("Enterprise Platform Full Installation")
-        print("=" * 50)
-
-        if not args.force:
-            print("This will install the complete enterprise platform including:")
-            print("  - Cluster infrastructure")
-            print("  - Istio service mesh")
-            print("  - Certificate management")
-            print("  - Enterprise storage (OpenEBS)")
-            print("  - Object storage (MinIO)")
-            print("  - Sample application")
-            print("  - Security policies and routing")
-            print()
-
-            response = input("Continue with full installation? (y/N): ")
-            if response.lower() != 'y':
-                print("Installation cancelled")
-                return True
-
-        self._initialize(args.config)
 
         try:
             # Step 1: Ensure cluster is running
@@ -770,6 +752,198 @@ class EnterpriseSimCLI:
             traceback.print_exc()
             return False
 
+    def full_platform_build(self, args):
+        """Build and install the complete enterprise platform following the documented process."""
+        print("Enterprise Platform Full Build")
+        print("=" * 50)
+
+        try:
+            # Phase 1: Core Infrastructure
+            print("\nPhase 1: Core Infrastructure Setup")
+            print("-" * 30)
+
+            # Step 1.1: Create cluster if it doesn't exist
+            print("Step 1.1: Ensuring cluster is running")
+            if not self.cluster_manager.exists():
+                print("Cluster not found. Creating new k3d cluster...")
+                if not self.cluster_manager.create():
+                    print("❌ ERROR: Failed to create cluster. Aborting build.")
+                    return False
+                self.cluster_manager.get_kubeconfig()
+            else:
+                print("✅ SUCCESS: Cluster is already running.")
+
+            # Step 1.2: Install Istio service mesh
+            print("\nStep 1.2: Installing Istio Service Mesh")
+            if self.config_manager.is_service_enabled('istio'):
+                if not service_registry.install_services(['istio']):
+                    print("❌ ERROR: Failed to install Istio. Aborting build.")
+                    return False
+                print("✅ SUCCESS: Istio installed successfully.")
+            else:
+                print("SKIPPED: Istio service is not enabled in the configuration.")
+
+            # Phase 2: Security & Certificates
+            print("\nPhase 2: Security & Certificate Setup")
+            print("-" * 30)
+
+            # Step 2.1: Install cert-manager
+            print("Step 2.1: Installing Certificate Manager")
+            if self.config_manager.is_service_enabled('cert-manager'):
+                if not service_registry.install_services(['cert-manager']):
+                    print("❌ ERROR: Failed to install cert-manager. Aborting build.")
+                    return False
+                print("✅ SUCCESS: cert-manager installed successfully.")
+            else:
+                print("SKIPPED: cert-manager service is not enabled in the configuration.")
+
+            # Step 2.2: Setup TLS certificates
+            print("\nStep 2.2: Setting up TLS Certificates")
+            domain = self.config_manager.config.environment.get('domain', 'localhost')
+            self.cert_manager.domain = domain
+            self.cert_manager.wildcard_domain = f"*.{domain}"
+            self.cert_manager.secret_name = self._compute_tls_secret_name(domain)
+
+            # Determine certificate mode
+            if domain == 'localhost':
+                cert_mode = 'self-signed'
+            elif self.cert_manager._has_cloudflare_credentials():
+                cert_mode = 'letsencrypt'
+            else:
+                cert_mode = 'self-signed'
+                print("WARNING: No CloudFlare credentials found, using self-signed certificates for production domain.")
+
+            if not self.cert_manager.setup_certificates(mode=cert_mode, staging=True):
+                print("❌ ERROR: Certificate setup failed. Aborting build.")
+                return False
+            if not self.cert_manager.validate_certificate():
+                print("❌ ERROR: Certificate validation failed. Aborting build.")
+                return False
+            print("✅ SUCCESS: TLS certificates are configured and validated.")
+
+            # Phase 3: Region & Gateway Setup
+            print("\nPhase 3: Region & Gateway Setup")
+            print("-" * 30)
+
+            # Step 3.1: Setup Regions
+            print("Step 3.1: Setting up regional namespaces and policies")
+            regions = self.config_manager.config.regions
+            if not self.region_manager.setup_regions(regions):
+                print("❌ ERROR: Failed to set up regions. Aborting build.")
+                return False
+            print("✅ SUCCESS: Regions configured successfully.")
+
+            # Step 3.2: Setup Gateway
+            print("\nStep 3.2: Setting up ingress gateway")
+            self.gateway_manager.domain = domain
+            self.gateway_manager.wildcard_domain = f"*.{domain}"
+            self.gateway_manager.gateway_name = f"{self._derive_env_from_domain(domain)}-gateway"
+            self.gateway_manager.secret_name = self._compute_tls_secret_name(domain)
+            if not self.gateway_manager.create_wildcard_gateway():
+                print("❌ ERROR: Failed to create gateway. Aborting build.")
+                return False
+            if not self.gateway_manager.validate_gateway_connectivity():
+                print("❌ ERROR: Gateway validation failed. Aborting build.")
+                return False
+            print("✅ SUCCESS: Ingress gateway configured and validated.")
+
+            # Phase 4: Storage Setup
+            print("\nPhase 4: Storage Setup")
+            print("-" * 30)
+
+            # Step 4.1: Install OpenEBS
+            print("Step 4.1: Installing OpenEBS for persistent storage")
+            if self.config_manager.is_service_enabled('storage'):
+                if not service_registry.install_services(['storage']):
+                    print("❌ ERROR: Failed to install OpenEBS. Aborting build.")
+                    return False
+                storage_service = service_registry.get_service('storage')
+                if not storage_service.validate():
+                    print("❌ ERROR: OpenEBS validation failed. Aborting build.")
+                    return False
+                print("✅ SUCCESS: OpenEBS installed and validated.")
+            else:
+                print("SKIPPED: Storage service is not enabled in the configuration.")
+
+            # Phase 5: Object Storage Setup
+            print("\nPhase 5: Object Storage Setup")
+            print("-" * 30)
+
+            # Step 5.1: Install MinIO
+            print("Step 5.1: Installing MinIO Operator and Tenant")
+            if self.config_manager.is_service_enabled('minio'):
+                if not service_registry.install_services(['minio']):
+                    print("❌ ERROR: Failed to install MinIO. Aborting build.")
+                    return False
+                
+                # Step 5.2: Setup MinIO External Access
+                print("\nStep 5.2: Setting up MinIO external access")
+                minio_service = service_registry.get_service('minio')
+                gateway_name = f"{self._derive_env_from_domain(domain)}-gateway"
+                if not minio_service.setup_external_access(domain, gateway_name):
+                    print("❌ ERROR: Failed to set up MinIO external access. Aborting build.")
+                    return False
+                if not minio_service.validate():
+                    print("❌ ERROR: MinIO validation failed. Aborting build.")
+                    return False
+                print("✅ SUCCESS: MinIO installed and validated.")
+            else:
+                print("SKIPPED: MinIO service is not enabled in the configuration.")
+
+            # Phase 6: Application Deployment
+            print("\nPhase 6: Application Deployment")
+            print("-" * 30)
+
+            # Step 6.1: Deploy sample application
+            print("Step 6.1: Deploying sample application")
+            if self.config_manager.is_service_enabled('sample-app'):
+                if not service_registry.install_services(['sample-app']):
+                    print("❌ ERROR: Failed to deploy sample application. Aborting build.")
+                    return False
+                sample_app_service = service_registry.get_service('sample-app')
+                if not sample_app_service.validate():
+                    print("❌ ERROR: Sample application validation failed. Aborting build.")
+                    return False
+                print("✅ SUCCESS: Sample application deployed and validated.")
+            else:
+                print("SKIPPED: Sample application service is not enabled in the configuration.")
+
+
+            print("\nPlatform build setup complete.")
+
+            # Phase 7: Platform Endpoints
+            print("\n\n✅ Enterprise Simulation Platform is ready!")
+            print("=" * 50)
+            print("📍 Access URLs:")
+            print("-" * 50)
+
+            domain = self.config_manager.config.environment.get('domain', 'localhost')
+            status_info = service_registry.get_status(domain)
+            for service_name, info in status_info.items():
+                if info['installed'] and info['endpoints']:
+                    print(f"\n🔗 {service_name.upper()}:")
+                    for endpoint in info['endpoints']:
+                        if 'External' in endpoint['type']:
+                            print(f"  - {endpoint['name']}: {endpoint['url']}")
+
+            app_config = self.config_manager.get_service_config('sample-app').config
+            app_name = app_config.get('app_name', 'hello-app')
+            region = app_config.get('region', 'us')
+            
+            print("\n\n🚀 Get Started:")
+            print("-" * 50)
+            print(f"Access the main application dashboard at:")
+            print(f"https://{region}-{app_name}.{domain}")
+            print("\n" + "=" * 50)
+
+            return True
+
+        except Exception as e:
+            print(f"❌ Build failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
     def reset(self, args):
         """Reset and reinstall entire platform (orchestration command)."""
         print("Enterprise Platform Reset & Reinstall")
@@ -792,10 +966,12 @@ class EnterpriseSimCLI:
         self._initialize(args.config)
 
         try:
-            # Step 1: Uninstall all services
-            print("\nStep 1: Removing All Services")
+            # Phase 1: Teardown
+            print("\nPhase 1: Tearing Down Platform")
             print("-" * 30)
 
+            # Step 1.1: Uninstall all services
+            print("Step 1.1: Removing All Services")
             all_services = ['sample-app', 'minio', 'storage', 'cert-manager', 'istio']
 
             for service_name in all_services:
@@ -807,10 +983,12 @@ class EnterpriseSimCLI:
                     except Exception as e:
                         print(f"WARNING: Error uninstalling {service_name}: {e}")
 
-            # Step 2: Destroy cluster
-            print("\nStep 2: Destroying Cluster")
-            print("-" * 30)
+            # Step 1.2: Remove sample-app .env file
+            print("Step 1.2: Cleaning up environment files")
+            self._cleanup_env_files()
 
+            # Step 1.3: Destroy cluster
+            print("Step 1.3: Destroying Cluster")
             if self.cluster_manager.exists():
                 print("Destroying k3d cluster...")
                 if not self.cluster_manager.delete():
@@ -820,8 +998,8 @@ class EnterpriseSimCLI:
             else:
                 print("SUCCESS: Cluster already removed")
 
-            # Step 3: Clean rebuild
-            print("\nStep 3: Clean Rebuild")
+            # Phase 2: Clean rebuild
+            print("\nPhase 2: Rebuilding Platform")
             print("-" * 30)
 
             # Brief pause to ensure cleanup
@@ -829,10 +1007,10 @@ class EnterpriseSimCLI:
             print("Waiting for cleanup to complete...")
             time.sleep(5)
 
-            # Now run full-up
-            print("Starting full installation...")
-            args.force = True  # Skip confirmation for full-up since we already confirmed reset
-            return self.full_up(args)
+            # Now run full platform build
+            print("Starting full platform build...")
+            args.force = True  # Skip confirmation since we already confirmed reset
+            return self.full_platform_build(args)
 
         except Exception as e:
             print(f"❌ Reset failed: {e}")
@@ -972,6 +1150,9 @@ class EnterpriseSimCLI:
         if not args.command:
             parser.print_help()
             return True
+
+        # Initialize managers and configuration before running any command
+        self._initialize(args.config)
 
         # Handle nested commands
         if args.command == 'cluster' and not hasattr(args, 'func'):

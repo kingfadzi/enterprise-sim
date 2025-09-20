@@ -3,6 +3,7 @@
 import subprocess
 import time
 import json
+import os
 from typing import Optional, List, Dict
 from .config import ClusterConfig
 
@@ -41,9 +42,15 @@ class ClusterManager:
         ]
 
 
-        # Add volume mounts if specified
+                # Add volume mounts if specified
         for mount in self.config.volume_mounts:
-            cmd.extend(['--volume', mount])
+            host_path, container_path = mount.split(':', 1)
+            expanded_host_path = os.path.expanduser(host_path)
+            
+            if not os.path.isabs(expanded_host_path):
+                expanded_host_path = os.path.abspath(expanded_host_path)
+            
+            cmd.extend(['--volume', f'{expanded_host_path}:{container_path}'])
 
         print(f"Running: {' '.join(cmd)}")
 

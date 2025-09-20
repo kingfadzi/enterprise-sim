@@ -33,6 +33,7 @@ class EnterpriseConfig:
     cluster: ClusterConfig = field(default_factory=ClusterConfig)
     services: Dict[str, ServiceConfig] = field(default_factory=dict)
     environment: Dict[str, str] = field(default_factory=dict)
+    regions: List[str] = field(default_factory=lambda: ['us', 'eu', 'ap'])
 
     def __post_init__(self):
         """Initialize default service configurations."""
@@ -102,7 +103,8 @@ class ConfigManager:
         return EnterpriseConfig(
             cluster=cluster,
             services=services,
-            environment=data.get('environment', {})
+            environment=data.get('environment', {}),
+            regions=data.get('regions', ['us', 'eu', 'ap'])
         )
 
     def _detect_environment(self):
@@ -125,6 +127,18 @@ class ConfigManager:
         # Apply configuration environment overrides
         for key, value in self.config.environment.items():
             os.environ[key] = value
+
+    def validate_config(self):
+        """Validate configuration for required credentials."""
+        domain = self.config.environment.get('domain', 'localhost')
+        if domain != 'localhost':
+            # Let's Encrypt will be used, so check for Cloudflare credentials
+            required_vars = ['CLOUDFLARE_EMAIL', 'CLOUDFLARE_API_TOKEN']
+            missing_vars = [var for var in required_vars if not os.getenv(var)]
+            if missing_vars:
+                raise EnvironmentError(
+                    f"Domain '{domain}' requires Let's Encrypt, but the following environment variables are missing: {', '.join(missing_vars)}"
+                )
 
     def _command_exists(self, command: str) -> bool:
         """Check if command exists in PATH."""
@@ -166,7 +180,8 @@ class ConfigManager:
                 }
                 for name, svc in self.config.services.items()
             },
-            'environment': self.config.environment
+            'environment': self.config.environment,
+            'regions': self.config.regions
         }
 
         with open(output_file, 'w') as f:

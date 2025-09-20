@@ -172,7 +172,7 @@ spec:
         except Exception:
             return ServiceHealth.UNKNOWN
 
-    def get_endpoints(self) -> List[Dict[str, str]]:
+    def get_endpoints(self, domain: str) -> List[Dict[str, str]]:
         """Get cert-manager service endpoints."""
         endpoints = []
 

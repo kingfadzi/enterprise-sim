@@ -101,44 +101,25 @@ class SampleAppService(BaseService):
             traceback.print_exc()
             return False
 
-    def get_endpoints(self) -> List[Dict[str, str]]:
+    def get_endpoints(self, domain: str) -> List[Dict[str, str]]:
         """Get service endpoints for external access."""
         endpoints = []
+        app_name = self.config.config.get("app_name", "hello-app")
+        region = self.config.config.get("region", "us")
 
-        try:
-            # Get domain from environment config
-            domain = self._get_domain()
-            app_name = self.config.config.get("app_name", "hello-app")
-            region = self.config.config.get("region", "us")
+        # External application endpoint
+        endpoints.append({
+            "name": "Enterprise Dashboard",
+            "url": f"https://{region}-{app_name}.{domain}",
+            "type": "External Web Application"
+        })
 
-            # External application endpoint
-            endpoints.append({
-                "name": "Enterprise Dashboard",
-                "url": f"https://{region}-{app_name}.{domain}",
-                "type": "External Web Application"
-            })
-
-            # API endpoints
-            endpoints.append({
-                "name": "Platform API",
-                "url": f"https://{region}-{app_name}.{domain}/api",
-                "type": "External REST API"
-            })
-
-            # Internal service endpoint
-            app_service = self.k8s.get_resource("service", app_name, self.namespace)
-            if app_service:
-                cluster_ip = app_service.get("spec", {}).get("clusterIP")
-                if cluster_ip:
-                    endpoints.append({
-                        "name": "Internal Service",
-                        "url": f"http://{cluster_ip}:8080",
-                        "type": "Internal ClusterIP"
-                    })
-
-        except Exception as e:
-            print(f"Warning: Could not determine endpoints: {e}")
-
+        # API endpoints
+        endpoints.append({
+            "name": "Platform API",
+            "url": f"https://{region}-{app_name}.{domain}/api",
+            "type": "External REST API"
+        })
         return endpoints
 
     def get_health(self) -> ServiceHealth:
@@ -310,6 +291,7 @@ class SampleAppService(BaseService):
             app_name = self.config.config.get("app_name", "hello-app")
             region = self.config.config.get("region", "us")
             domain = self._get_domain()
+            s3_endpoint = f"s3.{domain}"
 
             # Create .env file from template
             current_dir = os.getcwd()
@@ -323,6 +305,11 @@ class SampleAppService(BaseService):
                 # Replace template variables
                 env_content = env_content.replace('APP_NAME=hello-app', f'APP_NAME={app_name}')
                 env_content = env_content.replace('REGION=ap', f'REGION={region}')
+
+                # Append platform-injected variables
+                env_content += f"\n\n# Platform-injected variables\n"
+                env_content += f"S3_ENDPOINT_URL=https://{s3_endpoint}\n"
+                env_content += f"DOMAIN={domain}\n"
 
                 with open(env_path, 'w') as f:
                     f.write(env_content)

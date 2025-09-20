@@ -84,7 +84,7 @@ class BaseService(ABC):
         pass
 
     @abstractmethod
-    def get_endpoints(self) -> List[Dict[str, str]]:
+    def get_endpoints(self, domain: str) -> List[Dict[str, str]]:
         """Get service endpoints for external access."""
         pass
 
@@ -268,7 +268,7 @@ class BaseService(ABC):
 
         return False
 
-    def get_info(self) -> Dict:
+    def get_info(self, domain: str) -> Dict:
         """Get comprehensive service information."""
         return {
             'name': self.name,
@@ -278,6 +278,6 @@ class BaseService(ABC):
             'enabled': self.config.enabled,
             'version': self.config.version,
             'dependencies': list(self.dependencies),
-            'endpoints': self.get_endpoints(),
+            'endpoints': self.get_endpoints(domain),
             'installed': self.is_installed()
         }

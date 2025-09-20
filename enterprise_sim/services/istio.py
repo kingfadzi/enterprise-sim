@@ -25,11 +25,7 @@ class IstioService(BaseService):
 
     @property
     def helm_chart(self) -> Dict[str, str]:
-        return {
-            'repo': 'istio',
-            'repo_url': 'https://istio-release.storage.googleapis.com/charts',
-            'chart': 'istiod'
-        }
+        return None
 
     def get_helm_values(self) -> Dict:
         """Get Helm values for Istio."""
@@ -214,7 +210,7 @@ class IstioService(BaseService):
         except Exception:
             return ServiceHealth.UNKNOWN
 
-    def get_endpoints(self) -> List[Dict[str, str]]:
+    def get_endpoints(self, domain: str) -> List[Dict[str, str]]:
         """Get Istio service endpoints."""
         endpoints = []
 

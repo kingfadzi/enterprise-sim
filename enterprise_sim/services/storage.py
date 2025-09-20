@@ -99,7 +99,7 @@ class OpenEBSService(BaseService):
             traceback.print_exc()
             return False
 
-    def get_endpoints(self) -> List[Dict[str, str]]:
+    def get_endpoints(self, domain: str) -> List[Dict[str, str]]:
         """Get service endpoints for external access."""
         # Storage service doesn't expose external endpoints
         return []
@@ -157,26 +157,37 @@ class OpenEBSService(BaseService):
 
     def _create_storage_classes(self) -> bool:
         """Create enterprise storage classes."""
+        # Ensure cluster-state storage directory exists
+        import os
+        storage_base = os.path.abspath("./cluster-state/storage")
+
         storage_classes = [
             {
                 "name": "enterprise-standard",
                 "tier": "standard",
-                "basePath": "/var/openebs/local",
+                "basePath": f"{storage_base}/standard",
                 "isDefault": True
             },
             {
                 "name": "enterprise-ssd",
                 "tier": "ssd",
-                "basePath": "/var/openebs/ssd",
+                "basePath": f"{storage_base}/ssd",
                 "isDefault": False
             },
             {
                 "name": "enterprise-fast",
                 "tier": "fast",
-                "basePath": "/var/openebs/fast",
+                "basePath": f"{storage_base}/fast",
                 "isDefault": False
             }
         ]
+
+        # Create storage directories
+        for sc in storage_classes:
+            os.makedirs(sc["basePath"], exist_ok=True)
+            print(f"  Created storage directory: {sc['basePath']}")
+
+        print(f"Storage base directory: {storage_base}")
 
         for sc in storage_classes:
             is_default = str(sc['isDefault']).lower()

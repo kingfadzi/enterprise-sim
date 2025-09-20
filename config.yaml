@@ -1,11 +1,12 @@
 cluster:
   name: enterprise-sim
   workers: 3
-  registry_port: 5000
+  registry_port: 5001
   api_port: 6443
-  ingress_http_port: 8090    # Changed from 8080 (Rancher conflict)
-  ingress_https_port: 8453   # Changed from 8443 (Rancher conflict)
-  volume_mounts: []
+  ingress_http_port: 8090
+  ingress_https_port: 8453
+  volume_mounts:
+    - ./cluster-state/storage:/var/openebs
 
 services:
   istio:
@@ -35,7 +36,12 @@ services:
     version: "latest"
     config:
       app_name: "hello-app"
-      region: "us"
+      region: "ap"
 
 environment:
-  domain: "prod.butterflycluster.com"
+  domain: "local.butterflycluster.com"
+
+regions:
+  - us
+  - eu
+  - ap

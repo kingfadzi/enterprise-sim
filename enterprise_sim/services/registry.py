@@ -188,11 +188,11 @@ class ServiceRegistry:
             print(f"ERROR: Uninstallation failed: {e}")
             return False
 
-    def get_status(self) -> Dict[str, Dict]:
+    def get_status(self, domain: str) -> Dict[str, Dict]:
         """Get status of all services."""
         status = {}
         for name, service in self._instances.items():
-            status[name] = service.get_info()
+            status[name] = service.get_info(domain)
         return status
 
     def validate_all(self) -> bool:
