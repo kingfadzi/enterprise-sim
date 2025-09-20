@@ -671,13 +671,22 @@ class EnterpriseSimCLI:
 
             # Install remaining services in correct dependency order
             if enabled_services:
-                # Ensure correct installation order: storage -> istio -> minio -> sample-app
-                correct_order = ['storage', 'istio', 'minio', 'sample-app']
+                # Ensure correct installation order with proper dependencies
+                # istio -> storage -> minio -> sample-app
+                correct_order = ['istio', 'storage', 'minio', 'sample-app']
                 ordered_services = [s for s in correct_order if s in enabled_services]
 
                 for service_name in ordered_services:
                     print(f"\nInstalling {service_name}...")
-                    if not service_registry.install_services([service_name]):
+
+                    # Check if service is already installed
+                    service = service_registry.get_service(service_name)
+                    if service and service.is_installed():
+                        print(f"SKIPPING: {service_name} is already installed")
+                        continue
+
+                    # Install just this service directly
+                    if not service.install():
                         print(f"ERROR: Failed to install {service_name}")
                         return False
                     print(f"SUCCESS: {service_name} installed successfully")

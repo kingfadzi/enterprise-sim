@@ -28,6 +28,18 @@ class CertificateManager:
         print(f"Setting up TLS certificates for {self.wildcard_domain}")
         print(f"Certificate mode: {mode}")
 
+        # Check if we can reuse existing certificate (in cluster or from backup)
+        if self._cert_is_valid_in_cluster():
+            print(f"Reusing valid certificate from cluster: {self.secret_name}")
+            self._backup_certificate()
+            return True
+
+        # If not in cluster, try to restore from backup
+        if self._cert_is_valid_from_backup():
+            if self._restore_certificate_from_backup():
+                print(f"Reusing valid certificate from backup: {self.secret_name}")
+                return True
+
         # Validate domain for Let's Encrypt
         if mode == "letsencrypt":
             if not self._validate_domain_for_letsencrypt():
@@ -36,6 +48,8 @@ class CertificateManager:
                 print("       enterprise-sim security setup-certificates --mode self-signed")
                 return False
 
+        # Create new certificate
+        print(f"Creating new certificate: {self.secret_name}")
         if mode == "self-signed":
             return self._create_self_signed_certificate()
         elif mode == "letsencrypt":
@@ -662,6 +676,109 @@ spec:
 
         except Exception as e:
             print(f"ERROR: Certificate backup failed: {e}")
+            return False
+
+    def _cert_is_valid_in_cluster(self) -> bool:
+        """Check if certificate exists in cluster and is valid for at least 7 days."""
+        try:
+            # Check if secret exists in cert-manager namespace
+            secret = self.k8s.get_resource('secret', self.secret_name, 'cert-manager')
+            if not secret:
+                return False
+
+            # Check if it has certificate data
+            cert_data = secret.get('data', {}).get('tls.crt')
+            if not cert_data:
+                return False
+
+            # Decode and check validity
+            import base64
+            import subprocess
+            import tempfile
+
+            cert_bytes = base64.b64decode(cert_data)
+
+            with tempfile.NamedTemporaryFile(mode='wb', delete=False) as tmp_file:
+                tmp_file.write(cert_bytes)
+                tmp_file.flush()
+
+                # Check if cert is valid for at least 7 days (604800 seconds)
+                result = subprocess.run([
+                    'openssl', 'x509', '-checkend', '604800', '-noout', '-in', tmp_file.name
+                ], capture_output=True)
+
+                os.unlink(tmp_file.name)
+                return result.returncode == 0
+
+        except Exception as e:
+            print(f"Error checking certificate validity: {e}")
+            return False
+
+    def _cert_is_valid_from_backup(self) -> bool:
+        """Check if certificate backup exists and is valid."""
+        backup_dir = "./cluster-state"
+        backup_file = f"{backup_dir}/{self.secret_name}.yaml"
+
+        try:
+            if not os.path.exists(backup_file):
+                return False
+
+            # Parse YAML backup file and check certificate
+            import yaml
+            import base64
+            import subprocess
+            import tempfile
+
+            with open(backup_file, 'r') as f:
+                backup_data = yaml.safe_load(f)
+
+            cert_data = backup_data.get('data', {}).get('tls.crt')
+            if not cert_data:
+                return False
+
+            cert_bytes = base64.b64decode(cert_data)
+
+            with tempfile.NamedTemporaryFile(mode='wb', delete=False) as tmp_file:
+                tmp_file.write(cert_bytes)
+                tmp_file.flush()
+
+                # Check if cert is valid for at least 7 days
+                result = subprocess.run([
+                    'openssl', 'x509', '-checkend', '604800', '-noout', '-in', tmp_file.name
+                ], capture_output=True)
+
+                os.unlink(tmp_file.name)
+                return result.returncode == 0
+
+        except Exception as e:
+            print(f"Error checking backup certificate validity: {e}")
+            return False
+
+    def _restore_certificate_from_backup(self) -> bool:
+        """Restore certificate from backup file."""
+        backup_dir = "./cluster-state"
+        backup_file = f"{backup_dir}/{self.secret_name}.yaml"
+
+        try:
+            if not os.path.exists(backup_file):
+                print(f"No backup file found: {backup_file}")
+                return False
+
+            # Apply the backup file
+            import subprocess
+            result = subprocess.run([
+                'kubectl', 'apply', '-f', backup_file
+            ], capture_output=True, text=True)
+
+            if result.returncode == 0:
+                print(f"Certificate restored from backup: {backup_file}")
+                return True
+            else:
+                print(f"ERROR: Failed to restore certificate: {result.stderr}")
+                return False
+
+        except Exception as e:
+            print(f"ERROR: Certificate restore failed: {e}")
             return False
 
     def _validate_domain_for_letsencrypt(self) -> bool:
