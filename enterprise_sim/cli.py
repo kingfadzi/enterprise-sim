@@ -622,7 +622,7 @@ class EnterpriseSimCLI:
             print("\nStep 2: Platform Services")
             print("-" * 30)
 
-            # Install services in explicit order with validation
+            # Install services with proper dependency resolution
             service_order = ['cert-manager', 'storage', 'istio', 'minio', 'sample-app']
             enabled_services = [s for s in service_order if self.config_manager.is_service_enabled(s)]
 
@@ -632,49 +632,57 @@ class EnterpriseSimCLI:
 
             print(f"Installing services: {', '.join(enabled_services)}")
 
-            # Install each service individually to catch failures early
-            for service_name in enabled_services:
-                print(f"\nInstalling {service_name}...")
-                if not service_registry.install_services([service_name]):
-                    print(f"ERROR: Failed to install {service_name}")
+            # Install cert-manager first and setup certificates
+            if 'cert-manager' in enabled_services:
+                print(f"\nInstalling cert-manager...")
+                if not service_registry.install_services(['cert-manager']):
+                    print(f"ERROR: Failed to install cert-manager")
                     return False
-                print(f"SUCCESS: {service_name} installed successfully")
+                print(f"SUCCESS: cert-manager installed successfully")
 
-                # After cert-manager is installed, setup certificates
-                if service_name == 'cert-manager':
-                    print("Setting up SSL certificates for all services...")
-                    domain = self.config_manager.config.environment.get('domain', 'localhost')
+                # Setup certificates immediately after cert-manager
+                print("Setting up SSL certificates for all services...")
+                domain = self.config_manager.config.environment.get('domain', 'localhost')
 
-                    # Determine certificate mode based on domain and CloudFlare credentials
-                    if domain == 'localhost':
-                        cert_mode = 'self-signed'
-                    elif self.cert_manager._has_cloudflare_credentials():
-                        cert_mode = 'letsencrypt'
-                    else:
-                        cert_mode = 'self-signed'
-                        print("WARNING: No CloudFlare credentials found, using self-signed certificates")
+                # Determine certificate mode based on domain and CloudFlare credentials
+                if domain == 'localhost':
+                    cert_mode = 'self-signed'
+                elif self.cert_manager._has_cloudflare_credentials():
+                    cert_mode = 'letsencrypt'
+                else:
+                    cert_mode = 'self-signed'
+                    print("WARNING: No CloudFlare credentials found, using self-signed certificates")
 
-                    cert_staging = not getattr(args, 'prod', False)
+                cert_staging = not getattr(args, 'prod', False)
 
-                    print(f"DEBUG: Retrieved domain from config: '{domain}'")
-                    print(f"DEBUG: Selected cert_mode: '{cert_mode}'")
-                    print(f"DEBUG: cert_staging: {cert_staging}")
-                    print(f"DEBUG: Setting cert_manager.domain to: '{domain}'")
+                # Update cert manager with correct domain configuration
+                self.cert_manager.domain = domain
+                self.cert_manager.wildcard_domain = f"*.{domain}"
+                self.cert_manager.secret_name = f"{domain.replace('.', '-')}-tls"
 
-                    # Update cert manager with correct domain configuration
-                    self.cert_manager.domain = domain
-                    self.cert_manager.wildcard_domain = f"*.{domain}"
-                    self.cert_manager.secret_name = f"{domain.replace('.', '-')}-tls"
+                if not self.cert_manager.setup_certificates(cert_mode, cert_staging):
+                    print("ERROR: Certificate setup failed")
+                    return False
+                else:
+                    print("SUCCESS: SSL certificates configured")
 
-                    print(f"DEBUG: cert_manager.domain after update: '{self.cert_manager.domain}'")
-                    print(f"DEBUG: cert_manager.wildcard_domain: '{self.cert_manager.wildcard_domain}'")
-                    print(f"DEBUG: cert_manager.secret_name: '{self.cert_manager.secret_name}'")
+                # Remove cert-manager from the list since it's already installed
+                enabled_services = [s for s in enabled_services if s != 'cert-manager']
 
-                    if not self.cert_manager.setup_certificates(cert_mode, cert_staging):
-                        print("ERROR: Certificate setup failed")
+            # Install remaining services in correct dependency order
+            if enabled_services:
+                # Ensure correct installation order: storage -> istio -> minio -> sample-app
+                correct_order = ['storage', 'istio', 'minio', 'sample-app']
+                ordered_services = [s for s in correct_order if s in enabled_services]
+
+                for service_name in ordered_services:
+                    print(f"\nInstalling {service_name}...")
+                    if not service_registry.install_services([service_name]):
+                        print(f"ERROR: Failed to install {service_name}")
                         return False
-                    else:
-                        print("SUCCESS: SSL certificates configured")
+                    print(f"SUCCESS: {service_name} installed successfully")
+
+                print("SUCCESS: All services installed")
 
             # Step 3: Security and routing setup
             print("\nStep 3: Security & Routing")

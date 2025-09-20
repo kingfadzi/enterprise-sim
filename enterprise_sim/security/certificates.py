@@ -25,10 +25,6 @@ class CertificateManager:
             mode: Either 'self-signed' or 'letsencrypt'
             staging: Use Let's Encrypt staging environment (default True to avoid rate limits)
         """
-        print(f"DEBUG: CertificateManager.setup_certificates called with mode='{mode}', staging={staging}")
-        print(f"DEBUG: self.domain = '{self.domain}'")
-        print(f"DEBUG: self.wildcard_domain = '{self.wildcard_domain}'")
-        print(f"DEBUG: self.secret_name = '{self.secret_name}'")
         print(f"Setting up TLS certificates for {self.wildcard_domain}")
         print(f"Certificate mode: {mode}")
 
@@ -219,6 +215,7 @@ spec:
     solvers:
     - dns01:
         cloudflare:
+          email: {os.getenv('CLOUDFLARE_EMAIL')}
           apiTokenSecretRef:
             name: cloudflare-api-token-secret
             key: api-token
@@ -361,6 +358,8 @@ data:
 
         if self.k8s.apply_manifest(secret_manifest, 'cert-manager'):
             print(f"TLS secret created: {self.secret_name}")
+            # Backup the certificate
+            self._backup_certificate()
             return True
         else:
             print("ERROR: Failed to create TLS secret")
@@ -595,9 +594,13 @@ spec:
             return False
 
         # Wait for certificate to be ready
-        return self._wait_for_certificate(cert_name)
+        if self._wait_for_certificate(cert_name):
+            # Backup the certificate after successful creation
+            self._backup_certificate()
+            return True
+        return False
 
-    def _wait_for_certificate(self, cert_name: str, timeout: int = 600) -> bool:
+    def _wait_for_certificate(self, cert_name: str, timeout: int = 900) -> bool:
         """Wait for Certificate to be ready."""
         print(f"Waiting for Certificate {cert_name} to be ready (timeout: {timeout}s)...")
 
@@ -623,6 +626,43 @@ spec:
 
         print(f"ERROR: Certificate {cert_name} not ready after {timeout}s")
         return False
+
+    def _backup_certificate(self) -> bool:
+        """Backup certificate secret to cluster-state directory."""
+        import subprocess
+
+        backup_dir = "./cluster-state"
+        backup_file = f"{backup_dir}/{self.secret_name}.yaml"
+
+        try:
+            # Create backup directory
+            os.makedirs(backup_dir, exist_ok=True)
+
+            # Check if secret exists
+            secret = self.k8s.get_resource('secret', self.secret_name, 'cert-manager')
+            if not secret:
+                print(f"WARNING: Secret {self.secret_name} not found for backup")
+                return False
+
+            # Export secret to YAML file
+            cmd = [
+                'kubectl', 'get', 'secret', self.secret_name,
+                '-n', 'cert-manager', '-o', 'yaml'
+            ]
+
+            with open(backup_file, 'w') as f:
+                result = subprocess.run(cmd, stdout=f, stderr=subprocess.PIPE, text=True)
+
+            if result.returncode == 0:
+                print(f"Certificate backed up: {backup_file}")
+                return True
+            else:
+                print(f"ERROR: Failed to backup certificate: {result.stderr}")
+                return False
+
+        except Exception as e:
+            print(f"ERROR: Certificate backup failed: {e}")
+            return False
 
     def _validate_domain_for_letsencrypt(self) -> bool:
         """Validate that domain is suitable for Let's Encrypt certificates."""
