@@ -1,0 +1,13 @@
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: $dr_name
+  namespace: $namespace
+  labels:
+    service: $service_name
+    component: routing
+spec:
+  host: $service_host
+  trafficPolicy:
+    tls:
+      mode: ISTIO_MUTUAL

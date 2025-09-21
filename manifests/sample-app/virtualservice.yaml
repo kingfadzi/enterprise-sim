@@ -1,0 +1,21 @@
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: $app_name-external
+  namespace: $namespace
+  labels:
+    compliance.routing/enabled: "true"
+spec:
+  hosts:
+  - $region-$app_name.$domain
+  gateways:
+  - istio-system/$gateway_name
+  http:
+  - match:
+    - uri:
+        prefix: /
+    route:
+    - destination:
+        host: $app_name.$namespace.svc.cluster.local
+        port:
+          number: 8080

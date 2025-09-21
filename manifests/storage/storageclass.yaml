@@ -1,0 +1,16 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: $name
+  labels:
+    compliance.storage/managed-by: enterprise-sim
+    compliance.storage/tier: $tier
+    compliance.storage/encryption: enabled
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "$is_default"
+provisioner: openebs.io/local
+volumeBindingMode: WaitForFirstConsumer
+parameters:
+  storageType: hostpath
+  basePath: "$base_path"
+reclaimPolicy: Delete

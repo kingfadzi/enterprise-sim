@@ -1,10 +1,10 @@
 """MinIO object storage service implementation."""
 
 import time
-import yaml
 from typing import Dict, Any, Set, List, Optional
 from ..services.base import BaseService, ServiceStatus, ServiceHealth, ServiceConfig
 from ..utils.k8s import KubernetesClient, HelmClient
+from ..utils.manifests import load_manifest_documents, load_single_manifest, render_manifest
 
 
 class MinioService(BaseService):
@@ -109,55 +109,13 @@ class MinioService(BaseService):
         """Setup external access via Istio VirtualService."""
         tenant_namespace = "minio-system"
 
-        # Based on bash script - MinIO external routing
-        s3_vs_manifest = f"""apiVersion: networking.istio.io/v1beta1
-kind: VirtualService
-metadata:
-  name: minio-s3-vs
-  namespace: {tenant_namespace}
-  labels:
-    compliance.routing/enabled: "true"
-spec:
-  hosts:
-  - s3.{domain}
-  gateways:
-  - istio-system/{gateway_name}
-  http:
-  - match:
-    - uri:
-        prefix: /
-    route:
-    - destination:
-        host: minio.{tenant_namespace}.svc.cluster.local
-        port:
-          number: 9000
-"""
-
-        # Console VirtualService based on bash script
-        console_vs_manifest = f"""apiVersion: networking.istio.io/v1beta1
-kind: VirtualService
-metadata:
-  name: minio-console-vs
-  namespace: {tenant_namespace}
-  labels:
-    compliance.routing/enabled: "true"
-spec:
-  hosts:
-  - minio-console.{domain}
-  gateways:
-  - istio-system/{gateway_name}
-  http:
-  - match:
-    - uri:
-        prefix: /
-    route:
-    - destination:
-        host: enterprise-sim-console.{tenant_namespace}.svc.cluster.local
-        port:
-          number: 9090
-"""
         try:
-            for doc in yaml.safe_load_all(s3_vs_manifest):
+            for doc in load_manifest_documents(
+                "manifests/minio/virtualservice-s3.yaml",
+                namespace=tenant_namespace,
+                domain=domain,
+                gateway_name=gateway_name,
+            ):
                 self.k8s.custom_objects.create_namespaced_custom_object(
                     group="networking.istio.io",
                     version="v1beta1",
@@ -165,7 +123,13 @@ spec:
                     plural="virtualservices",
                     body=doc,
                 )
-            for doc in yaml.safe_load_all(console_vs_manifest):
+
+            for doc in load_manifest_documents(
+                "manifests/minio/virtualservice-console.yaml",
+                namespace=tenant_namespace,
+                domain=domain,
+                gateway_name=gateway_name,
+            ):
                 self.k8s.custom_objects.create_namespaced_custom_object(
                     group="networking.istio.io",
                     version="v1beta1",
@@ -281,125 +245,57 @@ spec:
 
         storage_size = self.config.config.get("storage_size", "10Gi")
 
-        # Create the tenant manifest based on bash script
-        tenant_manifest = f"""---
-# MinIO credentials secret - must be created first
-apiVersion: v1
-kind: Secret
-metadata:
-  name: minio-credentials
-  namespace: {tenant_namespace}
-  labels:
-    app: minio
-    compliance.platform: enterprise-sim
-type: Opaque
-stringData:
-  config.env: |
-    export MINIO_ROOT_USER="enterprise-admin"
-    export MINIO_ROOT_PASSWORD="enterprise-password-123"
----
-# Console secret
-apiVersion: v1
-kind: Secret
-metadata:
-  name: console-secret
-  namespace: {tenant_namespace}
-type: Opaque
-stringData:
-  CONSOLE_PBKDF_PASSPHRASE: "enterprise-sim-console-secret"
-  CONSOLE_PBKDF_SALT: "enterprise-sim-salt"
----
-# MinIO Tenant for Enterprise Simulation Platform
-apiVersion: minio.min.io/v2
-kind: Tenant
-metadata:
-  name: enterprise-sim
-  namespace: {tenant_namespace}
-  labels:
-    app: minio
-    compliance.platform: enterprise-sim
-    compliance.service: object-storage
-spec:
-  # Tenant configuration
-  image: quay.io/minio/minio:RELEASE.2024-09-09T16-59-28Z
-  configuration:
-    name: minio-credentials
-  pools:
-  - name: pool-0
-    servers: 4
-    volumesPerServer: 1
-    volumeClaimTemplate:
-      metadata:
-        name: data
-      spec:
-        accessModes:
-        - ReadWriteOnce
-        resources:
-          requests:
-            storage: {storage_size}
-        storageClassName: enterprise-standard
-  # Security and networking
-  requestAutoCert: false  # We'll use Istio mTLS
----
-# NetworkPolicy for MinIO
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: minio-netpol
-  namespace: {tenant_namespace}
-  labels:
-    compliance.platform: enterprise-sim
-    compliance.security: zero-trust
-spec:
-  podSelector:
-    matchLabels:
-      app: minio
-  policyTypes:
-  - Ingress
-  - Egress
-  ingress:
-  # Allow traffic from Istio ingress gateway
-  - from:
-    - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: istio-system
-  # Allow traffic from region namespaces (apps)
-  - from:
-    - namespaceSelector:
-        matchLabels:
-          compliance.region: us
-  - from:
-    - namespaceSelector:
-        matchLabels:
-          compliance.region: eu
-  - from:
-    - namespaceSelector:
-        matchLabels:
-          compliance.region: ap
-  egress:
-  # Allow DNS resolution
-  - to: []
-    ports:
-    - protocol: UDP
-      port: 53
-  # Allow communication within MinIO namespace
-  - to:
-    - namespaceSelector:
-        matchLabels:
-          name: minio-system
-"""
+        secret_manifests = [
+            (
+                "manifests/minio/credentials-secret.yaml",
+                {
+                    'namespace': tenant_namespace,
+                    'root_user': 'enterprise-admin',
+                    'root_password': 'enterprise-password-123',
+                },
+            ),
+            (
+                "manifests/minio/console-secret.yaml",
+                {
+                    'namespace': tenant_namespace,
+                    'console_passphrase': 'enterprise-sim-console-secret',
+                    'console_salt': 'enterprise-sim-salt',
+                },
+            ),
+        ]
+
         try:
-            for doc in yaml.safe_load_all(tenant_manifest):
-                if doc['kind'] == 'Tenant':
-                    self.k8s.custom_objects.create_namespaced_custom_object(
-                        group="minio.min.io",
-                        version="v2",
-                        namespace=tenant_namespace,
-                        plural="tenants",
-                        body=doc,
-                    )
-                else:
-                    self.k8s.apply_manifest(yaml.dump(doc), tenant_namespace)
+            # Apply supporting secrets
+            for manifest_path, context in secret_manifests:
+                manifest_text = render_manifest(manifest_path, **context)
+                if not self.k8s.apply_manifest(manifest_text, tenant_namespace):
+                    print(f"  ❌ Failed to apply MinIO manifest: {manifest_path}")
+                    return False
+
+            # Create or update tenant CRD
+            tenant_spec = load_single_manifest(
+                "manifests/minio/tenant.yaml",
+                namespace=tenant_namespace,
+                image='quay.io/minio/minio:RELEASE.2024-09-09T16-59-28Z',
+                storage_size=storage_size,
+            )
+            self.k8s.custom_objects.create_namespaced_custom_object(
+                group="minio.min.io",
+                version="v2",
+                namespace=tenant_namespace,
+                plural="tenants",
+                body=tenant_spec,
+            )
+
+            # Apply network policy
+            network_policy_manifest = render_manifest(
+                "manifests/minio/network-policy.yaml",
+                namespace=tenant_namespace,
+            )
+            if not self.k8s.apply_manifest(network_policy_manifest, tenant_namespace):
+                print("  ❌ Failed to apply MinIO network policy")
+                return False
+
             return True
         except Exception as e:
             if "AlreadyExists" in str(e):

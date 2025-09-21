@@ -7,6 +7,7 @@ import time
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
 from ..utils.k8s import KubernetesClient
+from ..utils.manifests import load_single_manifest, render_manifest
 import base64
 import yaml
 from cryptography import x509
@@ -200,16 +201,10 @@ DNS.2 = {self.wildcard_domain}
             return False
 
         # Create secret for Cloudflare token
-        secret_manifest = f"""
-apiVersion: v1
-kind: Secret
-metadata:
-  name: cloudflare-api-token-secret
-  namespace: cert-manager
-type: Opaque
-stringData:
-  api-token: "{cloudflare_token}"
-"""
+        secret_manifest = render_manifest(
+            "manifests/certmgr/cloudflare-secret.yaml",
+            api_token=cloudflare_token,
+        )
 
         if not self.k8s.apply_manifest(secret_manifest, 'cert-manager'):
             print("ERROR: Failed to create Cloudflare token secret")
@@ -222,25 +217,13 @@ stringData:
         print(f"Creating ClusterIssuer for Let's Encrypt {env_name} environment")
         print(f"Server: {server_url}")
 
-        issuer_manifest = f"""
-apiVersion: cert-manager.io/v1
-kind: ClusterIssuer
-metadata:
-  name: letsencrypt-{env_name}
-spec:
-  acme:
-    server: {server_url}
-    email: admin@{self.domain}
-    privateKeySecretRef:
-      name: letsencrypt-{env_name}
-    solvers:
-    - dns01:
-        cloudflare:
-          email: {os.getenv('CLOUDFLARE_EMAIL')}
-          apiTokenSecretRef:
-            name: cloudflare-api-token-secret
-            key: api-token
-"""
+        issuer_manifest = render_manifest(
+            "manifests/certmgr/cluster-issuer.yaml",
+            issuer_name=f"letsencrypt-{env_name}",
+            server_url=server_url,
+            email=f"admin@{self.domain}",
+            cloudflare_email=os.getenv('CLOUDFLARE_EMAIL', ''),
+        )
 
         if not self.k8s.apply_manifest(issuer_manifest):
             print("ERROR: Failed to create ClusterIssuer")
@@ -256,21 +239,12 @@ spec:
         # Ensure target namespace exists before applying
         self.k8s.create_namespace('istio-system')
 
-        certificate_manifest = f"""
-apiVersion: cert-manager.io/v1
-kind: Certificate
-metadata:
-  name: {self.secret_name}
-  namespace: istio-system
-spec:
-  secretName: {self.secret_name}
-  issuerRef:
-    name: letsencrypt-{env_name}
-    kind: ClusterIssuer
-  dnsNames:
-  - "{self.domain}"
-  - "{self.wildcard_domain}"
-"""
+        certificate_manifest = render_manifest(
+            "manifests/certmgr/certificate.yaml",
+            certificate_name=self.secret_name,
+            issuer_name=f"letsencrypt-{env_name}",
+            domain=self.domain,
+        )
 
         # Validate YAML before applying
         if not self._validate_yaml(certificate_manifest):
@@ -482,25 +456,19 @@ data:
         try:
             # Delete TLS secret
             if self.k8s.get_resource('secret', self.secret_name, 'istio-system'):
-                secret_manifest = f"""
-apiVersion: v1
-kind: Secret
-metadata:
-  name: {self.secret_name}
-  namespace: istio-system
-"""
+                secret_manifest = render_manifest(
+                    "manifests/certmgr/tls-secret-delete.yaml",
+                    secret_name=self.secret_name,
+                )
                 self.k8s.delete_manifest(secret_manifest, 'istio-system')
                 print(f"TLS secret deleted: {self.secret_name}")
 
             # Delete Certificate resource if using Let's Encrypt
             if self.k8s.get_resource('certificate', self.secret_name, 'istio-system'):
-                cert_manifest = f"""
-apiVersion: cert-manager.io/v1
-kind: Certificate
-metadata:
-  name: {self.secret_name}
-  namespace: istio-system
-"""
+                cert_manifest = render_manifest(
+                    "manifests/certmgr/certificate-delete.yaml",
+                    certificate_name=self.secret_name,
+                )
                 self.k8s.delete_manifest(cert_manifest, 'istio-system')
                 print(f"Certificate resource deleted: {self.secret_name}")
 
@@ -522,16 +490,10 @@ metadata:
         """Create CloudFlare credentials secret for cert-manager."""
         print("Creating CloudFlare credentials secret...")
 
-        secret_manifest = f"""
-apiVersion: v1
-kind: Secret
-metadata:
-  name: cloudflare-api-token-secret
-  namespace: cert-manager
-type: Opaque
-stringData:
-  api-token: "{os.getenv('CLOUDFLARE_API_TOKEN')}"
-"""
+        secret_manifest = render_manifest(
+            "manifests/certmgr/cloudflare-secret.yaml",
+            api_token=os.getenv('CLOUDFLARE_API_TOKEN', ''),
+        )
         return self.k8s.apply_manifest(secret_manifest, 'cert-manager')
 
     def _create_cloudflare_cluster_issuer(self, staging: bool = True) -> bool:
@@ -541,26 +503,14 @@ stringData:
 
         print(f"Creating ClusterIssuer: letsencrypt-{env_name}")
 
-        issuer_manifest = f"""
-apiVersion: cert-manager.io/v1
-kind: ClusterIssuer
-metadata:
-  name: letsencrypt-{env_name}
-spec:
-  acme:
-    server: {server_url}
-    email: {os.getenv('CLOUDFLARE_EMAIL')}
-    privateKeySecretRef:
-      name: letsencrypt-{env_name}
-    solvers:
-    - dns01:
-        cloudflare:
-          email: {os.getenv('CLOUDFLARE_EMAIL')}
-          apiTokenSecretRef:
-            name: cloudflare-api-token-secret
-            key: api-token
-"""
-        return self.k8s.apply_manifest(issuer_manifest, None)  # ClusterIssuer is cluster-scoped
+        issuer_manifest = render_manifest(
+            "manifests/certmgr/cluster-issuer.yaml",
+            issuer_name=f"letsencrypt-{env_name}",
+            server_url=server_url,
+            email=os.getenv('CLOUDFLARE_EMAIL', ''),
+            cloudflare_email=os.getenv('CLOUDFLARE_EMAIL', ''),
+        )
+        return self.k8s.apply_manifest(issuer_manifest)
 
     def _wait_for_cluster_issuer(self, issuer_name: str, timeout: int = 120) -> bool:
         """Wait for ClusterIssuer to be ready."""

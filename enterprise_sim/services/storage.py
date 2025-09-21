@@ -4,6 +4,7 @@ import time
 from typing import Dict, Any, Set, List, Optional
 from ..services.base import BaseService, ServiceStatus, ServiceHealth, ServiceConfig
 from ..utils.k8s import KubernetesClient, HelmClient
+from ..utils.manifests import render_manifest
 
 
 class OpenEBSService(BaseService):
@@ -191,25 +192,15 @@ class OpenEBSService(BaseService):
 
         for sc in storage_classes:
             is_default = str(sc['isDefault']).lower()
-            manifest = f"""apiVersion: storage.k8s.io/v1
-kind: StorageClass
-metadata:
-  name: {sc['name']}
-  labels:
-    compliance.storage/managed-by: enterprise-sim
-    compliance.storage/tier: {sc['tier']}
-    compliance.storage/encryption: enabled
-  annotations:
-    storageclass.kubernetes.io/is-default-class: "{is_default}"
-provisioner: openebs.io/local
-volumeBindingMode: WaitForFirstConsumer
-parameters:
-  storageType: hostpath
-  basePath: "{sc['basePath']}"
-reclaimPolicy: Delete
-"""
+            manifest_text = render_manifest(
+                "manifests/storage/storageclass.yaml",
+                name=sc['name'],
+                tier=sc['tier'],
+                is_default=is_default,
+                base_path=sc['basePath'],
+            )
 
-            if not self.k8s.apply_manifest(manifest):
+            if not self.k8s.apply_manifest(manifest_text):
                 print(f"ERROR: Failed to create storage class: {sc['name']}")
                 return False
 
@@ -222,12 +213,14 @@ reclaimPolicy: Delete
         storage_classes = ["enterprise-standard", "enterprise-ssd", "enterprise-fast"]
 
         for sc_name in storage_classes:
-            manifest = f"""apiVersion: storage.k8s.io/v1
-kind: StorageClass
-metadata:
-  name: {sc_name}
-"""
-            self.k8s.delete_manifest(manifest)
+            manifest_text = render_manifest(
+                "manifests/storage/storageclass.yaml",
+                name=sc_name,
+                tier='placeholder',
+                is_default='false',
+                base_path='/tmp',
+            )
+            self.k8s.delete_manifest(manifest_text)
             print(f"  Removed storage class: {sc_name}")
 
         return True

@@ -5,6 +5,7 @@ import time
 from typing import Dict, Any, Set, List, Optional
 from ..services.base import BaseService, ServiceStatus, ServiceHealth, ServiceConfig
 from ..utils.k8s import KubernetesClient, HelmClient
+from ..utils.manifests import render_manifest
 
 
 class SampleAppService(BaseService):
@@ -347,136 +348,24 @@ class SampleAppService(BaseService):
 
     def _deploy_simple_app(self, app_name: str, region: str) -> bool:
         """Deploy a simple version of the application."""
-        # Simple deployment manifest
-        deployment_manifest = f"""apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: {app_name}
-  namespace: {self.namespace}
-  labels:
-    app: {app_name}
-    version: v1
-    compliance.region: {region}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: {app_name}
-      version: v1
-  template:
-    metadata:
-      labels:
-        app: {app_name}
-        version: v1
-        compliance.region: {region}
-      annotations:
-        sidecar.istio.io/inject: "true"
-    spec:
-      containers:
-      - name: {app_name}
-        image: python:3.9-slim
-        command:
-        - python
-        - -c
-        - |
-          import http.server
-          import socketserver
-          import json
-          from datetime import datetime
+        deployment_manifest = render_manifest(
+            "manifests/sample-app/deployment.yaml",
+            app_name=app_name,
+            namespace=self.namespace,
+            region=region,
+        )
 
-          class Handler(http.server.SimpleHTTPRequestHandler):
-              def do_GET(self):
-                  if self.path == '/api/health':
-                      self.send_response(200)
-                      self.send_header('Content-type', 'application/json')
-                      self.end_headers()
-                      self.wfile.write(json.dumps({{"status": "healthy", "timestamp": datetime.utcnow().isoformat() + "Z"}}).encode())
-                  elif self.path == '/api/ready':
-                      self.send_response(200)
-                      self.send_header('Content-type', 'application/json')
-                      self.end_headers()
-                      self.wfile.write(json.dumps({{"status": "ready", "timestamp": datetime.utcnow().isoformat() + "Z"}}).encode())
-                  elif self.path.startswith('/api/'):
-                      self.send_response(200)
-                      self.send_header('Content-type', 'application/json')
-                      self.end_headers()
-                      self.wfile.write(json.dumps({{"message": "Enterprise Platform API", "app": "{app_name}", "region": "{region}"}}).encode())
-                  else:
-                      self.send_response(200)
-                      self.send_header('Content-type', 'text/html')
-                      self.end_headers()
-                      html = f'''
-                      <html><head><title>Enterprise Platform Dashboard</title></head>
-                      <body>
-                      <h1>🏢 Enterprise Platform Dashboard</h1>
-                      <h2>Application: {app_name}</h2>
-                      <h2>Region: {region}</h2>
-                      <p>✅ Platform services integration working!</p>
-                      <ul>
-                      <li><a href="/api/health">Health API</a></li>
-                      <li><a href="/api/ready">Ready API</a></li>
-                      <li><a href="/api/posture">Security Posture API</a></li>
-                      </ul>
-                      </body></html>
-                      '''
-                      self.wfile.write(html.encode())
+        service_manifest = render_manifest(
+            "manifests/sample-app/service.yaml",
+            app_name=app_name,
+            namespace=self.namespace,
+            region=region,
+        )
 
-          with socketserver.TCPServer(("", 8080), Handler) as httpd:
-              print("Serving Enterprise Dashboard on port 8080")
-              httpd.serve_forever()
-        ports:
-        - name: http
-          containerPort: 8080
-          protocol: TCP
-        env:
-        - name: APP_NAME
-          value: "{app_name}"
-        - name: REGION
-          value: "{region}"
-        - name: NAMESPACE
-          value: "{self.namespace}"
-        livenessProbe:
-          httpGet:
-            path: /api/health
-            port: http
-          initialDelaySeconds: 30
-          periodSeconds: 10
-        readinessProbe:
-          httpGet:
-            path: /api/ready
-            port: http
-          initialDelaySeconds: 5
-          periodSeconds: 5
-        resources:
-          requests:
-            memory: "128Mi"
-            cpu: "100m"
-          limits:
-            memory: "256Mi"
-            cpu: "200m"
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: {app_name}
-  namespace: {self.namespace}
-  labels:
-    app: {app_name}
-    compliance.region: {region}
-    compliance.routing/enabled: "true"
-spec:
-  type: ClusterIP
-  selector:
-    app: {app_name}
-  ports:
-  - name: http
-    port: 8080
-    targetPort: 8080
-    protocol: TCP
-"""
-
-        # Apply the deployment
         if not self.k8s.apply_manifest(deployment_manifest, self.namespace):
+            return False
+
+        if not self.k8s.apply_manifest(service_manifest, self.namespace):
             return False
 
         return True
@@ -487,32 +376,18 @@ spec:
             app_name = self.config.config.get("app_name", "hello-app")
             region = self.config.config.get("region", "us")
             domain = self._get_domain()
+            gateway_name = 'local-sim-gateway'
 
-            # Create VirtualService for external access
-            vs_manifest = f"""apiVersion: networking.istio.io/v1beta1
-kind: VirtualService
-metadata:
-  name: {app_name}-external
-  namespace: {self.namespace}
-  labels:
-    compliance.routing/enabled: "true"
-spec:
-  hosts:
-  - {region}-{app_name}.{domain}
-  gateways:
-  - istio-system/local-sim-gateway
-  http:
-  - match:
-    - uri:
-        prefix: /
-    route:
-    - destination:
-        host: {app_name}.{self.namespace}.svc.cluster.local
-        port:
-          number: 8080
-"""
+            manifest_text = render_manifest(
+                "manifests/sample-app/virtualservice.yaml",
+                app_name=app_name,
+                namespace=self.namespace,
+                region=region,
+                domain=domain,
+                gateway_name=gateway_name,
+            )
 
-            if not self.k8s.apply_manifest(vs_manifest, self.namespace):
+            if not self.k8s.apply_manifest(manifest_text, self.namespace):
                 return False
 
             print(f"  ✅ External routing configured for {region}-{app_name}.{domain}")
@@ -527,14 +402,12 @@ spec:
         try:
             app_name = self.config.config.get("app_name", "hello-app")
 
-            # Remove VirtualService
-            vs_manifest = f"""apiVersion: networking.istio.io/v1beta1
-kind: VirtualService
-metadata:
-  name: {app_name}-external
-  namespace: {self.namespace}
-"""
-            self.k8s.delete_manifest(vs_manifest, self.namespace)
+            manifest_text = render_manifest(
+                "manifests/sample-app/virtualservice-delete.yaml",
+                app_name=app_name,
+                namespace=self.namespace,
+            )
+            self.k8s.delete_manifest(manifest_text, self.namespace)
             return True
 
         except Exception as e:

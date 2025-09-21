@@ -1,0 +1,27 @@
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: $vs_name
+  namespace: $namespace
+  labels:
+    app: $app_name
+    region: $region
+    component: canary-routing
+spec:
+  hosts:
+  - $host
+  gateways:
+  - istio-system/$gateway_name
+  http:
+  - match:
+    - uri:
+        prefix: /
+    route:
+    - destination:
+        host: $service_host
+        subset: v1
+      weight: $v1_weight
+    - destination:
+        host: $service_host
+        subset: v2
+      weight: $v2_weight

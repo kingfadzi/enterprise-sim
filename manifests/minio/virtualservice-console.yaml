@@ -1,0 +1,21 @@
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: minio-console-vs
+  namespace: $namespace
+  labels:
+    compliance.routing/enabled: "true"
+spec:
+  hosts:
+  - minio-console.$domain
+  gateways:
+  - istio-system/$gateway_name
+  http:
+  - match:
+    - uri:
+        prefix: /
+    route:
+    - destination:
+        host: enterprise-sim-console.$namespace.svc.cluster.local
+        port:
+          number: 9090

@@ -1,0 +1,28 @@
+apiVersion: minio.min.io/v2
+kind: Tenant
+metadata:
+  name: enterprise-sim
+  namespace: $namespace
+  labels:
+    app: minio
+    compliance.platform: enterprise-sim
+    compliance.service: object-storage
+spec:
+  image: $image
+  configuration:
+    name: minio-credentials
+  pools:
+  - name: pool-0
+    servers: 4
+    volumesPerServer: 1
+    volumeClaimTemplate:
+      metadata:
+        name: data
+      spec:
+        accessModes:
+        - ReadWriteOnce
+        resources:
+          requests:
+            storage: $storage_size
+        storageClassName: enterprise-standard
+  requestAutoCert: false

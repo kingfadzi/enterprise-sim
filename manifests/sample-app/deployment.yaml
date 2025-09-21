@@ -1,0 +1,106 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: $app_name
+  namespace: $namespace
+  labels:
+    app: $app_name
+    version: v1
+    compliance.region: $region
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: $app_name
+      version: v1
+  template:
+    metadata:
+      labels:
+        app: $app_name
+        version: v1
+        compliance.region: $region
+      annotations:
+        sidecar.istio.io/inject: "true"
+    spec:
+      containers:
+      - name: $app_name
+        image: python:3.9-slim
+        command:
+        - python
+        - -c
+        - |
+          import http.server
+          import socketserver
+          import json
+          from datetime import datetime
+
+          class Handler(http.server.SimpleHTTPRequestHandler):
+              def do_GET(self):
+                  if self.path == '/api/health':
+                      self.send_response(200)
+                      self.send_header('Content-type', 'application/json')
+                      self.end_headers()
+                      self.wfile.write(json.dumps({"status": "healthy", "timestamp": datetime.utcnow().isoformat() + "Z"}).encode())
+                  elif self.path == '/api/ready':
+                      self.send_response(200)
+                      self.send_header('Content-type', 'application/json')
+                      self.end_headers()
+                      self.wfile.write(json.dumps({"status": "ready", "timestamp": datetime.utcnow().isoformat() + "Z"}).encode())
+                  elif self.path.startswith('/api/'):
+                      self.send_response(200)
+                      self.send_header('Content-type', 'application/json')
+                      self.end_headers()
+                      self.wfile.write(json.dumps({"message": "Enterprise Platform API", "app": "$app_name", "region": "$region"}).encode())
+                  else:
+                      self.send_response(200)
+                      self.send_header('Content-type', 'text/html')
+                      self.end_headers()
+                      html = '''
+                      <html><head><title>Enterprise Platform Dashboard</title></head>
+                      <body>
+                      <h1>🏢 Enterprise Platform Dashboard</h1>
+                      <h2>Application: $app_name</h2>
+                      <h2>Region: $region</h2>
+                      <p>✅ Platform services integration working!</p>
+                      <ul>
+                      <li><a href="/api/health">Health API</a></li>
+                      <li><a href="/api/ready">Ready API</a></li>
+                      <li><a href="/api/posture">Security Posture API</a></li>
+                      </ul>
+                      </body></html>
+                      '''
+                      self.wfile.write(html.encode())
+
+          with socketserver.TCPServer(("", 8080), Handler) as httpd:
+              print("Serving Enterprise Dashboard on port 8080")
+              httpd.serve_forever()
+        ports:
+        - name: http
+          containerPort: 8080
+          protocol: TCP
+        env:
+        - name: APP_NAME
+          value: "$app_name"
+        - name: REGION
+          value: "$region"
+        - name: NAMESPACE
+          value: "$namespace"
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /api/ready
+            port: http
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"

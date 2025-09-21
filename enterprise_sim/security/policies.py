@@ -2,6 +2,7 @@
 
 from typing import List
 from ..utils.k8s import KubernetesClient
+from ..utils.manifests import render_manifest
 
 
 class PolicyManager:
@@ -42,63 +43,9 @@ class PolicyManager:
         """Apply network policy for istio-system namespace."""
         print("Applying network policy to istio-system")
 
-        istio_network_policy = """
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: istio-system-policy
-  namespace: istio-system
-spec:
-  podSelector: {}
-  policyTypes:
-  - Ingress
-  - Egress
-  ingress:
-  # Allow ingress from everywhere for gateway
-  - from: []
-    to:
-    - podSelector:
-        matchLabels:
-          app: istio-ingressgateway
-  # Allow ingress from application namespaces to istiod
-  - from:
-    - namespaceSelector:
-        matchLabels:
-          istio-injection: enabled
-    to:
-    - podSelector:
-        matchLabels:
-          app: istiod
-    ports:
-    - protocol: TCP
-      port: 15010
-    - protocol: TCP
-      port: 15011
-    - protocol: TCP
-      port: 15012
-  egress:
-  # Allow DNS resolution
-  - to: []
-    ports:
-    - protocol: UDP
-      port: 53
-    - protocol: TCP
-      port: 53
-  # Allow egress to Kubernetes API server
-  - to: []
-    ports:
-    - protocol: TCP
-      port: 443
-    - protocol: TCP
-      port: 6443
-  # Allow egress to application namespaces
-  - to:
-    - namespaceSelector:
-        matchLabels:
-          istio-injection: enabled
-"""
+        manifest_text = render_manifest("manifests/security/istio-system-policy.yaml")
 
-        if not self.k8s.apply_manifest(istio_network_policy, 'istio-system'):
+        if not self.k8s.apply_manifest(manifest_text, 'istio-system'):
             print("ERROR: Failed to apply istio-system network policy")
             return False
 

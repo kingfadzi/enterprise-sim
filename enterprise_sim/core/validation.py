@@ -4,6 +4,7 @@ import subprocess
 import time
 from typing import Dict, List, Optional, Tuple
 from ..utils.k8s import KubernetesClient
+from ..utils.manifests import render_manifest
 from kubernetes.client.exceptions import ApiException
 
 
@@ -209,21 +210,8 @@ class ServiceValidator:
         """Check DNS functionality."""
         try:
             # Create a test pod to check DNS
-            test_pod_manifest = """
-apiVersion: v1
-kind: Pod
-metadata:
-  name: dns-test
-  namespace: default
-spec:
-  containers:
-  - name: test
-    image: busybox:1.36
-    command: ['sleep', '60']
-  restartPolicy: Never
-"""
+            test_pod_manifest = render_manifest("manifests/validation/dns-test-pod.yaml")
 
-            # Apply test pod
             if not self.k8s.apply_manifest(test_pod_manifest):
                 return ValidationResult(
                     "DNS Functionality",

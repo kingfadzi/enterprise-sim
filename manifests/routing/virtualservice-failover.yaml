@@ -1,0 +1,25 @@
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: $vs_name
+  namespace: $namespace
+  labels:
+    app: $app_name
+    region: $primary_region
+    component: failover-routing
+spec:
+  hosts:
+  - $host
+  gateways:
+  - istio-system/$gateway_name
+  http:
+  - match:
+    - uri:
+        prefix: /
+    route:
+    - destination:
+        host: $primary_service_host
+      weight: $primary_weight
+    - destination:
+        host: $failover_service_host
+      weight: $failover_weight

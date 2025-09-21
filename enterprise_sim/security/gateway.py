@@ -1,9 +1,10 @@
 """Istio ingress gateway management for enterprise simulation."""
 
 import time
-import yaml
 from typing import Dict, List, Optional
+import yaml
 from ..utils.k8s import KubernetesClient
+from ..utils.manifests import load_single_manifest, render_manifest
 
 
 class GatewayManager:
@@ -29,41 +30,13 @@ class GatewayManager:
             return False
 
         # Create the gateway
-        gateway_manifest = f"""
-apiVersion: networking.istio.io/v1beta1
-kind: Gateway
-metadata:
-  name: {self.gateway_name}
-  namespace: istio-system
-  labels:
-    app: enterprise-simulation
-    component: gateway
-spec:
-  selector:
-    istio: ingressgateway
-  servers:
-  # HTTP server for redirect
-  - port:
-      number: 80
-      name: http
-      protocol: HTTP
-    hosts:
-    - "{self.wildcard_domain}"
-    tls:
-      httpsRedirect: true
-  # HTTPS server with TLS termination
-  - port:
-      number: 443
-      name: https
-      protocol: HTTPS
-    hosts:
-    - "{self.wildcard_domain}"
-    tls:
-      mode: SIMPLE
-      credentialName: {self.secret_name}
-"""
         try:
-            body = yaml.safe_load(gateway_manifest)
+            body = load_single_manifest(
+                "manifests/gateway/wildcard-gateway.yaml",
+                gateway_name=self.gateway_name,
+                domain=self.domain,
+                secret_name=self.secret_name,
+            )
             self.k8s.custom_objects.create_namespaced_custom_object(
                 group="networking.istio.io",
                 version="v1beta1",
@@ -115,33 +88,19 @@ spec:
         print(f"  Hostname: {hostname}")
         print(f"  Target: {service_name}.{namespace}:{port}")
 
-        virtual_service_manifest = f"""
-apiVersion: networking.istio.io/v1beta1
-kind: VirtualService
-metadata:
-  name: {vs_name}
-  namespace: {namespace}
-  labels:
-    app: {app_name}
-    region: {region}
-    component: routing
-spec:
-  hosts:
-  - "{hostname}"
-  gateways:
-  - istio-system/{self.gateway_name}
-  http:
-  - match:
-    - uri:
-        prefix: /
-    route:
-    - destination:
-        host: {service_name}.{namespace}.svc.cluster.local
-        port:
-          number: {port}
-"""
+        manifest_text = render_manifest(
+            "manifests/routing/virtualservice-basic.yaml",
+            vs_name=vs_name,
+            namespace=namespace,
+            app_name=app_name,
+            region=region,
+            host=hostname,
+            gateway_name=self.gateway_name,
+            service_host=f"{service_name}.{namespace}.svc.cluster.local",
+            service_port=port,
+        )
 
-        if not self.k8s.apply_manifest(virtual_service_manifest, namespace):
+        if not self.k8s.apply_manifest(manifest_text, namespace):
             print(f"ERROR: Failed to create VirtualService {vs_name}")
             return False
 
@@ -161,36 +120,24 @@ spec:
 
         print(f"Creating DestinationRule: {dr_name}")
 
-        destination_rule_manifest = f"""
-apiVersion: networking.istio.io/v1beta1
-kind: DestinationRule
-metadata:
-  name: {dr_name}
-  namespace: {namespace}
-  labels:
-    service: {service_name}
-    component: routing
-spec:
-  host: {service_name}.{namespace}.svc.cluster.local
-  trafficPolicy:
-    tls:
-      mode: ISTIO_MUTUAL
-"""
+        service_host = f"{service_name}.{namespace}.svc.cluster.local"
+        manifest_doc = load_single_manifest(
+            "manifests/routing/destinationrule-basic.yaml",
+            dr_name=dr_name,
+            namespace=namespace,
+            service_name=service_name,
+            service_host=service_host,
+        )
 
-        # Add version subsets if specified
         if versions:
-            subsets = []
-            for version in versions:
-                subsets.append(f"""
-  - name: {version}
-    labels:
-      version: {version}""")
+            manifest_doc.setdefault('spec', {})['subsets'] = [
+                {'name': version, 'labels': {'version': version}}
+                for version in versions
+            ]
 
-            destination_rule_manifest += f"""
-  subsets:{(''.join(subsets))}
-"""
+        manifest_text = yaml.dump(manifest_doc)
 
-        if not self.k8s.apply_manifest(destination_rule_manifest, namespace):
+        if not self.k8s.apply_manifest(manifest_text, namespace):
             print(f"ERROR: Failed to create DestinationRule {dr_name}")
             return False
 
@@ -227,38 +174,21 @@ spec:
         if not self.create_destination_rule(service_name, namespace, ['v1', 'v2']):
             return False
 
-        # Create VirtualService with weighted routing
-        canary_virtual_service = f"""
-apiVersion: networking.istio.io/v1beta1
-kind: VirtualService
-metadata:
-  name: {vs_name}
-  namespace: {namespace}
-  labels:
-    app: {app_name}
-    region: {region}
-    component: canary-routing
-spec:
-  hosts:
-  - "{hostname}"
-  gateways:
-  - istio-system/{self.gateway_name}
-  http:
-  - match:
-    - uri:
-        prefix: /
-    route:
-    - destination:
-        host: {service_name}.{namespace}.svc.cluster.local
-        subset: v1
-      weight: {v1_weight}
-    - destination:
-        host: {service_name}.{namespace}.svc.cluster.local
-        subset: v2
-      weight: {v2_weight}
-"""
+        service_host = f"{service_name}.{namespace}.svc.cluster.local"
+        manifest_text = render_manifest(
+            "manifests/routing/virtualservice-canary.yaml",
+            vs_name=vs_name,
+            namespace=namespace,
+            app_name=app_name,
+            region=region,
+            host=hostname,
+            gateway_name=self.gateway_name,
+            service_host=service_host,
+            v1_weight=v1_weight,
+            v2_weight=v2_weight,
+        )
 
-        if not self.k8s.apply_manifest(canary_virtual_service, namespace):
+        if not self.k8s.apply_manifest(manifest_text, namespace):
             print(f"ERROR: Failed to create canary VirtualService {vs_name}")
             return False
 
@@ -285,35 +215,21 @@ spec:
         print(f"  Primary ({primary_region}): {primary_weight}%")
         print(f"  Failover ({failover_region}): {failover_percentage}%")
 
-        failover_virtual_service = f"""
-apiVersion: networking.istio.io/v1beta1
-kind: VirtualService
-metadata:
-  name: {vs_name}
-  namespace: region-{primary_region}
-  labels:
-    app: {app_name}
-    region: {primary_region}
-    component: failover-routing
-spec:
-  hosts:
-  - "{hostname}"
-  gateways:
-  - istio-system/{self.gateway_name}
-  http:
-  - match:
-    - uri:
-        prefix: /
-    route:
-    - destination:
-        host: {service_name}.region-{primary_region}.svc.cluster.local
-      weight: {primary_weight}
-    - destination:
-        host: {service_name}.region-{failover_region}.svc.cluster.local
-      weight: {failover_percentage}
-"""
+        manifest_text = render_manifest(
+            "manifests/routing/virtualservice-failover.yaml",
+            vs_name=vs_name,
+            namespace=f"region-{primary_region}",
+            app_name=app_name,
+            primary_region=primary_region,
+            host=hostname,
+            gateway_name=self.gateway_name,
+            primary_service_host=f"{service_name}.region-{primary_region}.svc.cluster.local",
+            failover_service_host=f"{service_name}.region-{failover_region}.svc.cluster.local",
+            primary_weight=primary_weight,
+            failover_weight=failover_percentage,
+        )
 
-        if not self.k8s.apply_manifest(failover_virtual_service, f"region-{primary_region}"):
+        if not self.k8s.apply_manifest(manifest_text, f"region-{primary_region}"):
             print(f"ERROR: Failed to create failover VirtualService {vs_name}")
             return False
 

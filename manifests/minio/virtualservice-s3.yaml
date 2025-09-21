@@ -1,0 +1,21 @@
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: minio-s3-vs
+  namespace: $namespace
+  labels:
+    compliance.routing/enabled: "true"
+spec:
+  hosts:
+  - s3.$domain
+  gateways:
+  - istio-system/$gateway_name
+  http:
+  - match:
+    - uri:
+        prefix: /
+    route:
+    - destination:
+        host: minio.$namespace.svc.cluster.local
+        port:
+          number: 9000

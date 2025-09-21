@@ -1,8 +1,8 @@
 """Region lifecycle management."""
 
 from typing import List
-import yaml
 from ..utils.k8s import KubernetesClient
+from ..utils.manifests import load_manifest_documents, load_single_manifest, render_manifest
 
 
 class RegionManager:
@@ -47,19 +47,13 @@ class RegionManager:
         print(f"    Setting up namespace: {namespace}")
 
         # Create namespace with labels
-        namespace_manifest = f"""
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: {namespace}
-  labels:
-    istio-injection: enabled
-    compliance.region: {region}
-    security.policy: zero-trust
-spec: {{}}
-"""
+        manifest_text = render_manifest(
+            "manifests/regions/namespace.yaml",
+            namespace=namespace,
+            region=region,
+        )
 
-        if not self.k8s.apply_manifest(namespace_manifest):
+        if not self.k8s.apply_manifest(manifest_text):
             print(f"ERROR: Failed to create namespace {namespace}")
             return False
 
@@ -70,18 +64,11 @@ spec: {{}}
         """Apply STRICT mTLS PeerAuthentication policy."""
         print(f"    Applying STRICT mTLS policy to {namespace}")
 
-        peer_auth_manifest = f"""
-apiVersion: security.istio.io/v1beta1
-kind: PeerAuthentication
-metadata:
-  name: default
-  namespace: {namespace}
-spec:
-  mtls:
-    mode: STRICT
-"""
         try:
-            body = yaml.safe_load(peer_auth_manifest)
+            body = load_single_manifest(
+                "manifests/regions/peer-auth.yaml",
+                namespace=namespace,
+            )
             self.k8s.custom_objects.create_namespaced_custom_object(
                 group="security.istio.io",
                 version="v1beta1",
@@ -104,31 +91,16 @@ spec:
         """Apply minimal AuthorizationPolicy allowing ingress."""
         print(f"    Applying authorization policy to {namespace}")
 
-        authz_policy_manifest = f"""
-apiVersion: security.istio.io/v1beta1
-kind: AuthorizationPolicy
-metadata:
-  name: allow-ingress-gateway
-  namespace: {namespace}
-spec:
-  rules:
-  - from:
-    - source:
-        principals: ["cluster.local/ns/istio-system/sa/istio-ingressgateway-service-account"]
-  - from:
-    - source:
-        namespaces: ["{namespace}"]
----
-apiVersion: security.istio.io/v1beta1
-kind: AuthorizationPolicy
-metadata:
-  name: deny-all
-  namespace: {namespace}
-spec:
-  {{}}
-"""
         try:
-            for doc in yaml.safe_load_all(authz_policy_manifest):
+            documents = load_manifest_documents(
+                "manifests/regions/authz-allow-ingress.yaml",
+                namespace=namespace,
+            ) + load_manifest_documents(
+                "manifests/regions/authz-deny-all.yaml",
+                namespace=namespace,
+            )
+
+            for doc in documents:
                 self.k8s.custom_objects.create_namespaced_custom_object(
                     group="security.istio.io",
                     version="v1beta1",
@@ -149,56 +121,12 @@ spec:
         """Apply baseline NetworkPolicy with zero-trust defaults."""
         print(f"    Applying network policy to {namespace}")
 
-        network_policy_manifest = f"""
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: baseline-zero-trust
-  namespace: {namespace}
-spec:
-  podSelector: {{}}
-  policyTypes:
-  - Ingress
-  - Egress
-  ingress:
-  - from:
-    - namespaceSelector:
-        matchLabels:
-          name: istio-system
-    - namespaceSelector:
-        matchLabels:
-          name: {namespace}
-  - from:
-    - podSelector: {{}}
-  egress:
-  # Allow DNS resolution
-  - to: []
-    ports:
-    - protocol: UDP
-      port: 53
-    - protocol: TCP
-      port: 53
-  # Allow Istio sidecar communication
-  - to:
-    - namespaceSelector:
-        matchLabels:
-          name: istio-system
-    ports:
-    - protocol: TCP
-      port: 15012
-  # Allow intra-namespace communication
-  - to:
-    - namespaceSelector:
-        matchLabels:
-          name: {namespace}
-  # Allow egress to other regions (for cross-region communication)
-  - to:
-    - namespaceSelector:
-        matchLabels:
-          security.policy: zero-trust
-"""
+        manifest_text = render_manifest(
+            "manifests/regions/network-policy.yaml",
+            namespace=namespace,
+        )
 
-        if not self.k8s.apply_manifest(network_policy_manifest, namespace):
+        if not self.k8s.apply_manifest(manifest_text, namespace):
             print(f"ERROR: Failed to apply NetworkPolicy to {namespace}")
             return False
 
