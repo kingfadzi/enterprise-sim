@@ -1,6 +1,7 @@
 """MinIO object storage service implementation."""
 
 import time
+import yaml
 from typing import Dict, Any, Set, List, Optional
 from ..services.base import BaseService, ServiceStatus, ServiceHealth, ServiceConfig
 from ..utils.k8s import KubernetesClient, HelmClient
@@ -155,15 +156,30 @@ spec:
         port:
           number: 9090
 """
-
-        # Apply VirtualServices
-        if not self.k8s.apply_manifest(s3_vs_manifest, tenant_namespace):
+        try:
+            for doc in yaml.safe_load_all(s3_vs_manifest):
+                self.k8s.custom_objects.create_namespaced_custom_object(
+                    group="networking.istio.io",
+                    version="v1beta1",
+                    namespace=tenant_namespace,
+                    plural="virtualservices",
+                    body=doc,
+                )
+            for doc in yaml.safe_load_all(console_vs_manifest):
+                self.k8s.custom_objects.create_namespaced_custom_object(
+                    group="networking.istio.io",
+                    version="v1beta1",
+                    namespace=tenant_namespace,
+                    plural="virtualservices",
+                    body=doc,
+                )
+            return True
+        except Exception as e:
+            if "AlreadyExists" in str(e):
+                print("MinIO VirtualServices already exist")
+                return True
+            print(f"ERROR: Failed to create MinIO VirtualServices: {e}")
             return False
-
-        if not self.k8s.apply_manifest(console_vs_manifest, tenant_namespace):
-            return False
-
-        return True
 
     def get_endpoints(self, domain: str) -> List[Dict[str, str]]:
         """Get service endpoints for external access."""
@@ -372,8 +388,25 @@ spec:
         matchLabels:
           name: minio-system
 """
-
-        return self.k8s.apply_manifest(tenant_manifest, tenant_namespace)
+        try:
+            for doc in yaml.safe_load_all(tenant_manifest):
+                if doc['kind'] == 'Tenant':
+                    self.k8s.custom_objects.create_namespaced_custom_object(
+                        group="minio.min.io",
+                        version="v2",
+                        namespace=tenant_namespace,
+                        plural="tenants",
+                        body=doc,
+                    )
+                else:
+                    self.k8s.apply_manifest(yaml.dump(doc), tenant_namespace)
+            return True
+        except Exception as e:
+            if "AlreadyExists" in str(e):
+                print("MinIO tenant already exists")
+                return True
+            print(f"ERROR: Failed to create MinIO tenant: {e}")
+            return False
 
     def _wait_for_tenant_ready(self, timeout: int = 300) -> bool:
         """Wait for MinIO tenant to be ready."""

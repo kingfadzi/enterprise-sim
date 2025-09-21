@@ -7,6 +7,10 @@ import time
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
 from ..utils.k8s import KubernetesClient
+import base64
+import yaml
+from cryptography import x509
+from cryptography.hazmat.backends import default_backend
 
 
 class CertificateManager:
@@ -104,7 +108,8 @@ class CertificateManager:
 
     def _create_openssl_config(self, config_file: str):
         """Create OpenSSL configuration for wildcard certificate."""
-        config_content = f"""[req]
+        config_content = f"""
+[req]
 distinguished_name = req_distinguished_name
 req_extensions = v3_req
 prompt = no
@@ -195,7 +200,8 @@ DNS.2 = {self.wildcard_domain}
             return False
 
         # Create secret for Cloudflare token
-        secret_manifest = f"""apiVersion: v1
+        secret_manifest = f"""
+apiVersion: v1
 kind: Secret
 metadata:
   name: cloudflare-api-token-secret
@@ -216,7 +222,8 @@ stringData:
         print(f"Creating ClusterIssuer for Let's Encrypt {env_name} environment")
         print(f"Server: {server_url}")
 
-        issuer_manifest = f"""apiVersion: cert-manager.io/v1
+        issuer_manifest = f"""
+apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
 metadata:
   name: letsencrypt-{env_name}
@@ -249,7 +256,8 @@ spec:
         # Ensure target namespace exists before applying
         self.k8s.create_namespace('istio-system')
 
-        certificate_manifest = f"""apiVersion: cert-manager.io/v1
+        certificate_manifest = f"""
+apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
   name: {self.secret_name}
@@ -358,11 +366,11 @@ spec:
         print(f"Creating TLS secret: {self.secret_name}")
 
         # Create the secret manifest
-        import base64
         cert_b64 = base64.b64encode(cert_data.encode()).decode()
         key_b64 = base64.b64encode(key_data.encode()).decode()
 
-        secret_manifest = f"""apiVersion: v1
+        secret_manifest = f"""
+apiVersion: v1
 kind: Secret
 metadata:
   name: {self.secret_name}
@@ -398,29 +406,19 @@ data:
                 return None
 
             # Decode and parse certificate
-            import base64
             cert_pem = base64.b64decode(cert_data).decode()
+            cert = x509.load_pem_x509_certificate(cert_pem.encode(), default_backend())
 
-            # Use openssl to get certificate info
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.crt', delete=False) as f:
-                f.write(cert_pem)
-                cert_file = f.name
-
-            try:
-                result = subprocess.run([
-                    'openssl', 'x509', '-in', cert_file, '-text', '-noout'
-                ], capture_output=True, text=True, check=True)
-
-                # Parse certificate details
-                cert_text = result.stdout
-                info = self._parse_certificate_info(cert_text)
-                info['secret_name'] = self.secret_name
-                info['namespace'] = 'istio-system'
-
-                return info
-
-            finally:
-                os.unlink(cert_file)
+            info = {
+                'subject': cert.subject.rfc4514_string(),
+                'issuer': cert.issuer.rfc4514_string(),
+                'not_before': cert.not_valid_before.isoformat(),
+                'not_after': cert.not_valid_after.isoformat(),
+                'secret_name': self.secret_name,
+                'namespace': 'istio-system',
+                'san': [name.value for name in cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value]
+            }
+            return info
 
         except Exception as e:
             print(f"Error getting certificate info: {e}")
@@ -652,37 +650,21 @@ spec:
 
     def _backup_certificate(self) -> bool:
         """Backup certificate secret to cluster-state directory."""
-        import subprocess
-
         backup_dir = "./cluster-state"
         backup_file = f"{backup_dir}/{self.secret_name}.yaml"
 
         try:
-            # Create backup directory
             os.makedirs(backup_dir, exist_ok=True)
-
-            # Check if secret exists
             secret = self.k8s.get_resource('secret', self.secret_name, 'istio-system')
             if not secret:
                 print(f"WARNING: Secret {self.secret_name} not found for backup")
                 return False
 
-            # Export secret to YAML file
-            cmd = [
-                'kubectl', 'get', 'secret', self.secret_name,
-                '-n', 'istio-system', '-o', 'yaml'
-            ]
-
             with open(backup_file, 'w') as f:
-                result = subprocess.run(cmd, stdout=f, stderr=subprocess.PIPE, text=True)
+                yaml.dump(secret, f)
 
-            if result.returncode == 0:
-                print(f"Certificate backed up: {backup_file}")
-                return True
-            else:
-                print(f"ERROR: Failed to backup certificate: {result.stderr}")
-                return False
-
+            print(f"Certificate backed up: {backup_file}")
+            return True
         except Exception as e:
             print(f"ERROR: Certificate backup failed: {e}")
             return False
@@ -690,35 +672,18 @@ spec:
     def _cert_is_valid_in_cluster(self) -> bool:
         """Check if certificate exists in cluster and is valid for at least 7 days."""
         try:
-            # Check if secret exists in cert-manager namespace
             secret = self.k8s.get_resource('secret', self.secret_name, 'istio-system')
             if not secret:
                 return False
 
-            # Check if it has certificate data
             cert_data = secret.get('data', {}).get('tls.crt')
             if not cert_data:
                 return False
 
-            # Decode and check validity
-            import base64
-            import subprocess
-            import tempfile
+            cert_pem = base64.b64decode(cert_data).decode()
+            cert = x509.load_pem_x509_certificate(cert_pem.encode(), default_backend())
 
-            cert_bytes = base64.b64decode(cert_data)
-
-            with tempfile.NamedTemporaryFile(mode='wb', delete=False) as tmp_file:
-                tmp_file.write(cert_bytes)
-                tmp_file.flush()
-
-                # Check if cert is valid for at least 7 days (604800 seconds)
-                result = subprocess.run([
-                    'openssl', 'x509', '-checkend', '604800', '-noout', '-in', tmp_file.name
-                ], capture_output=True)
-
-                os.unlink(tmp_file.name)
-                return result.returncode == 0
-
+            return cert.not_valid_after > datetime.now() + timedelta(days=7)
         except Exception as e:
             print(f"Error checking certificate validity: {e}")
             return False
@@ -732,12 +697,6 @@ spec:
             if not os.path.exists(backup_file):
                 return False
 
-            # Parse YAML backup file and check certificate
-            import yaml
-            import base64
-            import subprocess
-            import tempfile
-
             with open(backup_file, 'r') as f:
                 backup_data = yaml.safe_load(f)
 
@@ -745,20 +704,10 @@ spec:
             if not cert_data:
                 return False
 
-            cert_bytes = base64.b64decode(cert_data)
+            cert_pem = base64.b64decode(cert_data).decode()
+            cert = x509.load_pem_x509_certificate(cert_pem.encode(), default_backend())
 
-            with tempfile.NamedTemporaryFile(mode='wb', delete=False) as tmp_file:
-                tmp_file.write(cert_bytes)
-                tmp_file.flush()
-
-                # Check if cert is valid for at least 7 days
-                result = subprocess.run([
-                    'openssl', 'x509', '-checkend', '604800', '-noout', '-in', tmp_file.name
-                ], capture_output=True)
-
-                os.unlink(tmp_file.name)
-                return result.returncode == 0
-
+            return cert.not_valid_after > datetime.now() + timedelta(days=7)
         except Exception as e:
             print(f"Error checking backup certificate validity: {e}")
             return False
@@ -773,19 +722,7 @@ spec:
                 print(f"No backup file found: {backup_file}")
                 return False
 
-            # Apply the backup file
-            import subprocess
-            result = subprocess.run([
-                'kubectl', 'apply', '-f', backup_file
-            ], capture_output=True, text=True)
-
-            if result.returncode == 0:
-                print(f"Certificate restored from backup: {backup_file}")
-                return True
-            else:
-                print(f"ERROR: Failed to restore certificate: {result.stderr}")
-                return False
-
+            return self.k8s.apply_file(backup_file)
         except Exception as e:
             print(f"ERROR: Certificate restore failed: {e}")
             return False
@@ -822,7 +759,6 @@ spec:
     def _validate_yaml(self, yaml_content: str) -> bool:
         """Validate YAML syntax."""
         try:
-            import yaml
             yaml.safe_load(yaml_content)
             return True
         except yaml.YAMLError as e:

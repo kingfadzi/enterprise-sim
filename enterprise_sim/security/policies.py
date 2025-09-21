@@ -24,30 +24,12 @@ class PolicyManager:
     def _label_istio_system(self) -> bool:
         """Add security labels to istio-system namespace."""
         try:
-            # Get current namespace
-            namespace = self.k8s.get_resource('namespace', 'istio-system')
-            if not namespace:
-                print("ERROR: istio-system namespace not found")
-                return False
-
-            # Apply labels
-            label_patch = """
-{
-  "metadata": {
-    "labels": {
-      "name": "istio-system",
-      "security.policy": "system"
-    }
-  }
-}
-"""
-
-            # Use kubectl patch since we don't have a direct patch method
-            import subprocess
-            result = subprocess.run([
-                'kubectl', 'patch', 'namespace', 'istio-system',
-                '--type=merge', '-p', label_patch
-            ], check=True, capture_output=True)
+            labels = {
+                "name": "istio-system",
+                "security.policy": "system"
+            }
+            if not self.k8s.label_namespace("istio-system", labels):
+                raise Exception("Labeling failed via KubernetesClient")
 
             print("istio-system namespace labeled for security policies")
             return True

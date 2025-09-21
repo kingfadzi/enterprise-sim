@@ -1,6 +1,7 @@
 """Istio ingress gateway management for enterprise simulation."""
 
 import time
+import yaml
 from typing import Dict, List, Optional
 from ..utils.k8s import KubernetesClient
 
@@ -61,13 +62,23 @@ spec:
       mode: SIMPLE
       credentialName: {self.secret_name}
 """
-
-        if not self.k8s.apply_manifest(gateway_manifest, 'istio-system'):
-            print("ERROR: Failed to create wildcard gateway")
+        try:
+            body = yaml.safe_load(gateway_manifest)
+            self.k8s.custom_objects.create_namespaced_custom_object(
+                group="networking.istio.io",
+                version="v1beta1",
+                namespace="istio-system",
+                plural="gateways",
+                body=body,
+            )
+            print("Wildcard gateway created successfully")
+            return True
+        except Exception as e:
+            if "AlreadyExists" in str(e):
+                print("Wildcard gateway already exists")
+                return True
+            print(f"ERROR: Failed to create wildcard gateway: {e}")
             return False
-
-        print("Wildcard gateway created successfully")
-        return True
 
     def _verify_tls_secret(self) -> bool:
         """Verify that the TLS secret exists."""

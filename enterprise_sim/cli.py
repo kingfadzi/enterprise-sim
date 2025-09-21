@@ -13,6 +13,11 @@ from .services import service_registry, IstioService, CertManagerService, OpenEB
 from .security import CertificateManager, PolicyManager, GatewayManager
 
 
+class InitializationError(Exception):
+    """Raised when CLI initialization fails."""
+    pass
+
+
 class EnterpriseSimCLI:
     """Main CLI application for enterprise simulation."""
 
@@ -27,14 +32,16 @@ class EnterpriseSimCLI:
         self.gateway_manager: Optional[GatewayManager] = None
         self.region_manager: Optional[RegionManager] = None
 
-    def _initialize(self, config_file: Optional[str] = None):
+    def _initialize(self, config_file: Optional[str] = None, post_cluster_creation: bool = False):
         """Initialize managers and clients."""
         try:
-            self.config_manager = ConfigManager(config_file)
-            self.config_manager.validate_config()  # Validate config early
+            if not post_cluster_creation:
+                self.config_manager = ConfigManager(config_file)
+                self.config_manager.validate_config()  # Validate config early
+                cluster_config = self.config_manager.get_cluster_config()
+                self.cluster_manager = ClusterManager(cluster_config)
 
-            cluster_config = self.config_manager.get_cluster_config()
-            self.cluster_manager = ClusterManager(cluster_config)
+            # Initialize clients and managers that depend on a running cluster
             self.k8s_client = KubernetesClient()
             self.helm_client = HelmClient()
             self.validator = ServiceValidator(self.k8s_client)
@@ -66,8 +73,7 @@ class EnterpriseSimCLI:
                     service_registry.create_instance(service_name, service_config, self.k8s_client, self.helm_client)
 
         except Exception as e:
-            print(f"Failed to initialize: {e}")
-            sys.exit(1)
+            raise InitializationError(f"Failed to initialize: {e}") from e
 
     def _derive_env_from_domain(self, domain: str) -> str:
         """Derive environment name from a domain like 'prod.example.com'.
@@ -85,6 +91,12 @@ class EnterpriseSimCLI:
         """Mirror bash naming: {env}-wildcard-tls."""
         env = self._derive_env_from_domain(domain)
         return f"{env}-wildcard-tls"
+
+    def _current_domain(self) -> str:
+        """Return the active environment domain or localhost."""
+        if self.config_manager and self.config_manager.config:
+            return self.config_manager.config.environment.get('domain', 'localhost')
+        return 'localhost'
 
     def _cleanup_env_files(self):
         """Remove generated environment files."""
@@ -296,7 +308,7 @@ class EnterpriseSimCLI:
             # Show accessible URLs for installed services
             print("\n📍 Service Endpoints:")
             print("=" * 50)
-            status_info = service_registry.get_status()
+            status_info = service_registry.get_status(self._current_domain())
             for service_name in enabled_services:
                 if service_name in status_info:
                     info = status_info[service_name]
@@ -337,7 +349,7 @@ class EnterpriseSimCLI:
         print("Service Status:")
         print("=" * 50)
 
-        status_info = service_registry.get_status()
+        status_info = service_registry.get_status(self._current_domain())
         for service_name, info in status_info.items():
             enabled = "ENABLED" if info['enabled'] else "DISABLED"
             installed = "INSTALLED" if info['installed'] else "NOT_INSTALLED"
@@ -399,7 +411,7 @@ class EnterpriseSimCLI:
         print("\nService Configuration & Status")
         print("=" * 60)
 
-        status_info = service_registry.get_status()
+        status_info = service_registry.get_status(self._current_domain())
         for service_name, info in status_info.items():
             enabled = "✅ ENABLED" if info['enabled'] else "❌ DISABLED"
             installed = "✅ INSTALLED" if info['installed'] else "❌ NOT INSTALLED"
@@ -732,7 +744,7 @@ class EnterpriseSimCLI:
             # Show all accessible URLs
             print("\n📍 Platform Access URLs:")
             print("-" * 30)
-            status_info = service_registry.get_status()
+            status_info = service_registry.get_status(domain)
 
             for service_name, info in status_info.items():
                 if info['endpoints'] and info['installed']:
@@ -769,7 +781,7 @@ class EnterpriseSimCLI:
                 if not self.cluster_manager.create():
                     print("❌ ERROR: Failed to create cluster. Aborting build.")
                     return False
-                self.cluster_manager.get_kubeconfig()
+                self._initialize(args.config, post_cluster_creation=True)
             else:
                 print("✅ SUCCESS: Cluster is already running.")
 
@@ -1152,7 +1164,14 @@ class EnterpriseSimCLI:
             return True
 
         # Initialize managers and configuration before running any command
-        self._initialize(args.config)
+        try:
+            self._initialize(args.config)
+        except InitializationError as exc:
+            print(str(exc))
+            if getattr(args, 'verbose', False):
+                import traceback
+                traceback.print_exc()
+            return False
 
         # Handle nested commands
         if args.command == 'cluster' and not hasattr(args, 'func'):

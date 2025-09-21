@@ -1,11 +1,15 @@
 """k3d cluster lifecycle management."""
 
-import subprocess
-import time
 import json
 import os
+import subprocess
+import time
 from typing import Optional, List, Dict
+
+from kubernetes import config as k8s_config
+
 from .config import ClusterConfig
+from ..utils.k8s import KubernetesClient
 
 
 class ClusterManager:
@@ -13,6 +17,13 @@ class ClusterManager:
 
     def __init__(self, config: ClusterConfig):
         self.config = config
+        self.k8s_client = None
+
+    def _get_k8s_client(self) -> KubernetesClient:
+        """Lazily initialize and return the Kubernetes client."""
+        if not self.k8s_client:
+            self.k8s_client = KubernetesClient()
+        return self.k8s_client
 
     def create(self, force: bool = False) -> bool:
         """Create k3d cluster with enterprise configuration."""
@@ -41,15 +52,14 @@ class ClusterManager:
             '--k3s-arg', '--disable=traefik@server:*'
         ]
 
-
-                # Add volume mounts if specified
+        # Add volume mounts if specified
         for mount in self.config.volume_mounts:
             host_path, container_path = mount.split(':', 1)
             expanded_host_path = os.path.expanduser(host_path)
-            
+
             if not os.path.isabs(expanded_host_path):
                 expanded_host_path = os.path.abspath(expanded_host_path)
-            
+
             cmd.extend(['--volume', f'{expanded_host_path}:{container_path}'])
 
         print(f"Running: {' '.join(cmd)}")
@@ -57,11 +67,15 @@ class ClusterManager:
         try:
             print("Creating cluster infrastructure...")
             # Create cluster without --wait (faster, less prone to hanging)
-            result = subprocess.run(cmd, check=True, capture_output=False, text=True, timeout=180)
+            subprocess.run(cmd, check=True, capture_output=False, text=True, timeout=180)
             print("k3d cluster infrastructure created successfully")
 
+            # IMPORTANT: Update kubeconfig BEFORE initializing the client
+            self.get_kubeconfig()
+            self.k8s_client = None  # Force re-initialization
+
             print("Waiting for cluster to be ready...")
-            if self._wait_for_ready():
+            if self._wait_for_api_server() and self._wait_for_ready():
                 print("Cluster is ready and operational")
                 return True
             else:
@@ -168,32 +182,28 @@ class ClusterManager:
         """Update kubeconfig for cluster access."""
         try:
             print(f"   Merging kubeconfig for cluster: {self.config.name}")
-            result = subprocess.run([
+            subprocess.run([
                 'k3d', 'kubeconfig', 'merge', self.config.name,
                 '--kubeconfig-switch-context'
             ], check=True, capture_output=True, text=True, timeout=30)
 
             print(f"   Context switched to: k3d-{self.config.name}")
 
-            # Verify the context switch worked
+            # Verify the context switch worked using kubernetes config helpers
             try:
-                verify_result = subprocess.run([
-                    'kubectl', 'config', 'current-context'
-                ], check=True, capture_output=True, text=True, timeout=10)
+                _, current_context = k8s_config.list_kube_config_contexts()
+            except Exception:
+                print("   WARNING: Could not verify context switch")
+                return True  # Merge succeeded even if verification failed
 
-                current_context = verify_result.stdout.strip()
-                expected_context = f"k3d-{self.config.name}"
+            expected_context = f"k3d-{self.config.name}"
 
-                if current_context == expected_context:
-                    print(f"   Verified context: {current_context}")
-                    return True
-                else:
-                    print(f"   WARNING: Context mismatch: expected {expected_context}, got {current_context}")
-                    return False
+            if current_context and current_context.get('name') == expected_context:
+                print(f"   Verified context: {expected_context}")
+                return True
 
-            except subprocess.CalledProcessError:
-                print(f"   WARNING: Could not verify context switch")
-                return True  # Still return True since merge succeeded
+            print(f"   WARNING: Context mismatch: expected {expected_context}, got {current_context.get('name') if current_context else 'none'}")
+            return False
 
         except subprocess.TimeoutExpired:
             print(f"   ERROR: Kubeconfig merge timed out")
@@ -224,6 +234,22 @@ class ClusterManager:
         except (subprocess.CalledProcessError, json.JSONDecodeError):
             return None
 
+    def _wait_for_api_server(self, timeout: int = 60) -> bool:
+        """Wait for the Kubernetes API server to be ready."""
+        print("Waiting for API server to be ready...")
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            try:
+                # A lightweight command to check if the API server is responsive.
+                self._get_k8s_client().core_v1.get_api_resources()
+                print("\nAPI server is ready.")
+                return True
+            except Exception:
+                print(".", end='', flush=True)
+                time.sleep(2)
+        print("\nTimeout waiting for API server.")
+        return False
+
     def _wait_for_ready(self, timeout: int = 300) -> bool:
         """Wait for cluster to be ready."""
         print("Waiting for cluster nodes to be ready...")
@@ -232,25 +258,22 @@ class ClusterManager:
         dots_count = 0
 
         while time.time() - start_time < timeout:
-            try:
-                result = subprocess.run([
-                    'kubectl', 'get', 'nodes',
-                    '--no-headers', '-o', 'custom-columns=STATUS:.status.conditions[?(@.type=="Ready")].status'
-                ], check=True, capture_output=True, text=True, timeout=10)
-
-                statuses = result.stdout.strip().split('\n')
-                ready_nodes = [status.strip() for status in statuses if status.strip() == 'True']
-                total_nodes = [status.strip() for status in statuses if status.strip()]
-
-                if len(ready_nodes) == len(total_nodes) and len(total_nodes) > 0:
-                    print(f"\nAll {len(total_nodes)} nodes are ready")
+            nodes = self._get_k8s_client().get_resource('nodes', output='json')
+            if nodes and 'items' in nodes:
+                total_nodes = len(nodes['items'])
+                ready_nodes = 0
+                for node in nodes['items']:
+                    for condition in node['status']['conditions']:
+                        if condition['type'] == 'Ready' and condition['status'] == 'True':
+                            ready_nodes += 1
+                
+                if ready_nodes == total_nodes and total_nodes > 0:
+                    print(f"\nAll {total_nodes} nodes are ready")
                     return True
                 else:
-                    # Show progress with dots
-                    print(f"\r   Nodes ready: {len(ready_nodes)}/{len(total_nodes)} {'.' * (dots_count % 4)}", end='', flush=True)
+                    print(f"\r   Nodes ready: {ready_nodes}/{total_nodes} {'.' * (dots_count % 4)}", end='', flush=True)
                     dots_count += 1
-
-            except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            else:
                 print(f"\r   Checking cluster readiness {'.' * (dots_count % 4)}", end='', flush=True)
                 dots_count += 1
 
@@ -265,33 +288,28 @@ class ClusterManager:
             print("Cluster does not exist")
             return False
 
-        try:
-            # Check nodes
-            result = subprocess.run([
-                'kubectl', 'get', 'nodes'
-            ], check=True, capture_output=True, text=True)
-
-            node_count = len([line for line in result.stdout.split('\n')
-                            if line and not line.startswith('NAME')])
-
-            expected_nodes = self.config.workers + 1  # workers + server
-            if node_count != expected_nodes:
-                print(f"Expected {expected_nodes} nodes, found {node_count}")
-                return False
-
-            # Check system pods
-            result = subprocess.run([
-                'kubectl', 'get', 'pods', '-n', 'kube-system',
-                '--field-selector=status.phase!=Running'
-            ], check=True, capture_output=True, text=True)
-
-            if len(result.stdout.strip().split('\n')) > 1:  # More than header
-                print("Some system pods are not running")
-                return False
-
-            print("Cluster validation passed")
-            return True
-
-        except subprocess.CalledProcessError as e:
-            print(f"Cluster validation failed: {e.stderr}")
+        # Check nodes
+        nodes = self._get_k8s_client().get_resource('nodes', output='json')
+        if not nodes or 'items' not in nodes:
+            print("Could not get cluster nodes.")
             return False
+
+        node_count = len(nodes['items'])
+        expected_nodes = self.config.workers + 1  # workers + server
+        if node_count != expected_nodes:
+            print(f"Expected {expected_nodes} nodes, found {node_count}")
+            return False
+
+        # Check system pods
+        pods = self._get_k8s_client().get_pods(namespace='kube-system')
+        non_running_pods = [
+            pod['metadata']['name'] for pod in pods
+            if pod['status']['phase'] != 'Running'
+        ]
+
+        if non_running_pods:
+            print(f"Some system pods are not running: {non_running_pods}")
+            return False
+
+        print("Cluster validation passed")
+        return True

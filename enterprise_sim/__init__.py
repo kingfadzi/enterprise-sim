@@ -3,5 +3,6 @@
 __version__ = "0.1.0"
 __author__ = "Enterprise Simulation Team"
 
-# Don't import CLI here to avoid circular imports when using -m
-__all__ = ['__version__', '__author__']
+from .cli import EnterpriseSimCLI, main
+
+__all__ = ['__version__', '__author__', 'EnterpriseSimCLI', 'main']

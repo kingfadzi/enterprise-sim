@@ -4,6 +4,7 @@ import subprocess
 import time
 from typing import Dict, List, Optional, Tuple
 from ..utils.k8s import KubernetesClient
+from kubernetes.client.exceptions import ApiException
 
 
 class ValidationResult:
@@ -101,19 +102,17 @@ class ServiceValidator:
     def _check_kubectl_connectivity(self) -> ValidationResult:
         """Check kubectl connectivity."""
         try:
-            result = subprocess.run([
-                'kubectl', 'cluster-info'
-            ], check=True, capture_output=True, text=True, timeout=10)
-
+            # This checks if the API server is reachable.
+            self.k8s.core_v1.get_api_resources()
             return ValidationResult(
-                "Kubectl Connectivity",
+                "Kubernetes API Connectivity",
                 True,
                 "Cluster is accessible",
-                "kubectl cluster-info succeeded"
+                "API server responded successfully"
             )
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+        except ApiException as e:
             return ValidationResult(
-                "Kubectl Connectivity",
+                "Kubernetes API Connectivity",
                 False,
                 "Cannot connect to cluster",
                 str(e)
@@ -123,7 +122,7 @@ class ServiceValidator:
         """Check if all nodes are ready."""
         try:
             nodes = self.k8s.get_resource('nodes')
-            if not nodes:
+            if not nodes or 'items' not in nodes:
                 return ValidationResult(
                     "Node Readiness",
                     False,

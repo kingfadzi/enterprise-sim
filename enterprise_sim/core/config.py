@@ -81,7 +81,7 @@ class ConfigManager:
 
     def _dict_to_config(self, data: Dict) -> EnterpriseConfig:
         """Convert dictionary to EnterpriseConfig."""
-        cluster_data = data.get('cluster', {})
+        cluster_data = data.get('cluster') or {}
         cluster = ClusterConfig(
             name=cluster_data.get('name', 'enterprise-sim'),
             workers=cluster_data.get('workers', 3),
@@ -92,8 +92,9 @@ class ConfigManager:
             volume_mounts=cluster_data.get('volume_mounts', [])
         )
 
+        services_data = data.get('services') or {}
         services = {}
-        for name, svc_data in data.get('services', {}).items():
+        for name, svc_data in services_data.items():
             services[name] = ServiceConfig(
                 enabled=svc_data.get('enabled', True),
                 version=svc_data.get('version', 'latest'),
@@ -109,7 +110,7 @@ class ConfigManager:
 
     def _detect_environment(self):
         """Detect and validate environment dependencies."""
-        required_tools = ['k3d', 'kubectl', 'docker', 'helm']
+        required_tools = ['k3d', 'docker']
         missing_tools = []
 
         for tool in required_tools:
@@ -131,14 +132,44 @@ class ConfigManager:
     def validate_config(self):
         """Validate configuration for required credentials."""
         domain = self.config.environment.get('domain', 'localhost')
-        if domain != 'localhost':
-            # Let's Encrypt will be used, so check for Cloudflare credentials
-            required_vars = ['CLOUDFLARE_EMAIL', 'CLOUDFLARE_API_TOKEN']
-            missing_vars = [var for var in required_vars if not os.getenv(var)]
+
+        # Development-friendly domains may operate with self-signed certificates.
+        if self._is_dev_domain(domain):
+            missing_vars = self._missing_cloudflare_vars()
             if missing_vars:
-                raise EnvironmentError(
-                    f"Domain '{domain}' requires Let's Encrypt, but the following environment variables are missing: {', '.join(missing_vars)}"
+                print(
+                    "WARNING: Proceeding with self-signed certificates for development domain "
+                    f"'{domain}'. Add Cloudflare credentials to enable Let's Encrypt."
                 )
+            return
+
+        missing_vars = self._missing_cloudflare_vars()
+        if missing_vars:
+            raise EnvironmentError(
+                "Domain '{domain}' requires Let's Encrypt, but the following environment "
+                "variables are missing: {vars}".format(
+                    domain=domain,
+                    vars=', '.join(missing_vars)
+                )
+            )
+
+    def _missing_cloudflare_vars(self) -> List[str]:
+        """Return a list of required Cloudflare env vars that are not set."""
+        required_vars = ['CLOUDFLARE_EMAIL', 'CLOUDFLARE_API_TOKEN']
+        return [var for var in required_vars if not os.getenv(var)]
+
+    def _is_dev_domain(self, domain: str) -> bool:
+        """Determine if domain should default to self-signed certificates."""
+        if not domain or domain in {'localhost', '127.0.0.1'}:
+            return True
+
+        dev_suffixes = ('.local', '.localdomain', '.test', '.example', '.invalid')
+        if any(domain.endswith(suffix) for suffix in dev_suffixes):
+            return True
+
+        first_label = domain.split('.')[0]
+        dev_prefixes = {'local', 'dev', 'test', 'staging', 'sandbox'}
+        return first_label in dev_prefixes
 
     def _command_exists(self, command: str) -> bool:
         """Check if command exists in PATH."""

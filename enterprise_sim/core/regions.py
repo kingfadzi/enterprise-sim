@@ -1,6 +1,7 @@
 """Region lifecycle management."""
 
 from typing import List
+import yaml
 from ..utils.k8s import KubernetesClient
 
 
@@ -79,13 +80,25 @@ spec:
   mtls:
     mode: STRICT
 """
-
-        if not self.k8s.apply_manifest(peer_auth_manifest, namespace):
-            print(f"ERROR: Failed to apply PeerAuthentication to {namespace}")
+        try:
+            body = yaml.safe_load(peer_auth_manifest)
+            self.k8s.custom_objects.create_namespaced_custom_object(
+                group="security.istio.io",
+                version="v1beta1",
+                namespace=namespace,
+                plural="peerauthentications",
+                body=body,
+            )
+            print(f"    STRICT mTLS enforced in {namespace}")
+            return True
+        except Exception as e:
+            # Check if it already exists
+            if "AlreadyExists" in str(e):
+                print(f"    PeerAuthentication already exists in {namespace}")
+                return True
+            print(f"ERROR: Failed to apply PeerAuthentication to {namespace}: {e}")
             return False
 
-        print(f"    STRICT mTLS enforced in {namespace}")
-        return True
 
     def _apply_authorization_policy(self, namespace: str) -> bool:
         """Apply minimal AuthorizationPolicy allowing ingress."""
@@ -114,13 +127,23 @@ metadata:
 spec:
   {{}}
 """
-
-        if not self.k8s.apply_manifest(authz_policy_manifest, namespace):
-            print(f"ERROR: Failed to apply AuthorizationPolicy to {namespace}")
+        try:
+            for doc in yaml.safe_load_all(authz_policy_manifest):
+                self.k8s.custom_objects.create_namespaced_custom_object(
+                    group="security.istio.io",
+                    version="v1beta1",
+                    namespace=namespace,
+                    plural="authorizationpolicies",
+                    body=doc,
+                )
+            print(f"    Authorization policies applied to {namespace}")
+            return True
+        except Exception as e:
+            if "AlreadyExists" in str(e):
+                print(f"    AuthorizationPolicy already exists in {namespace}")
+                return True
+            print(f"ERROR: Failed to apply AuthorizationPolicy to {namespace}: {e}")
             return False
-
-        print(f"    Authorization policies applied to {namespace}")
-        return True
 
     def _apply_network_policy(self, namespace: str) -> bool:
         """Apply baseline NetworkPolicy with zero-trust defaults."""

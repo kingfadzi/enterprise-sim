@@ -3,6 +3,7 @@
 import subprocess
 import time
 from typing import Dict, List, Set
+from kubernetes.client.exceptions import ApiException
 from .base import BaseService, ServiceHealth
 from ..core.config import ServiceConfig
 from ..utils.k8s import KubernetesClient, HelmClient
@@ -317,9 +318,21 @@ class IstioService(BaseService):
     def _cleanup_crds(self) -> bool:
         """Clean up Istio CRDs (use with caution)."""
         try:
-            subprocess.run([
-                'kubectl', 'delete', 'crd', '-l', 'app=istio-pilot'
-            ], check=True, capture_output=True)
+            if not self.k8s.apiextensions_v1:
+                subprocess.run([
+                    'kubectl', 'delete', 'crd', '-l', 'app=istio-pilot'
+                ], check=True, capture_output=True)
+                return True
+
+            crds = self.k8s.apiextensions_v1.list_custom_resource_definition(
+                label_selector='app=istio-pilot'
+            )
+            for crd in crds.items:
+                name = crd.metadata.name
+                self.k8s.apiextensions_v1.delete_custom_resource_definition(name)
             return True
         except subprocess.CalledProcessError:
+            return False
+        except ApiException as exc:
+            print(f"Failed to delete Istio CRDs via API: {exc}")
             return False
