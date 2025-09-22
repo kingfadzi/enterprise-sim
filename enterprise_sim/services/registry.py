@@ -1,6 +1,6 @@
 """Service registry and dependency management."""
 
-from typing import Dict, List, Set, Type, Optional
+from typing import Any, Dict, List, Set, Type, Optional
 import time
 from .base import BaseService, ServiceStatus
 
@@ -15,6 +15,7 @@ class ServiceRegistry:
 
     def __init__(self):
         self._services: Dict[str, Type[BaseService]] = {}
+        self._factories: Dict[str, Any] = {}
         self._instances: Dict[str, BaseService] = {}
 
     def register(self, service_class: Type[BaseService]):
@@ -26,15 +27,37 @@ class ServiceRegistry:
         self._services[service_name] = service_class
         print(f"Registered service: {service_name}")
 
-    def create_instance(self, service_name: str, config, k8s_client, helm_client) -> BaseService:
+    def create_instance(
+        self,
+        service_name: str,
+        config,
+        k8s_client,
+        helm_client,
+        global_context: Optional[Dict] = None,
+    ) -> BaseService:
         """Create service instance."""
-        if service_name not in self._services:
+        if service_name in self._instances:
+            return self._instances[service_name]
+
+        if service_name in self._services:
+            service_class = self._services[service_name]
+            try:
+                instance = service_class(config, k8s_client, helm_client, global_context)
+            except TypeError:
+                instance = service_class(config, k8s_client, helm_client)
+        elif service_name in self._factories:
+            instance = self._factories[service_name](config, k8s_client, helm_client, global_context)
+        else:
             raise ValueError(f"Service {service_name} not registered")
 
-        service_class = self._services[service_name]
-        instance = service_class(config, k8s_client, helm_client)
         self._instances[service_name] = instance
         return instance
+
+    def register_manifest(self, manifest, factory):
+        self._factories[manifest.service_id] = factory
+
+    def registered_services(self) -> List[str]:
+        return list(self._services.keys()) + list(self._factories.keys())
 
     def get_service(self, service_name: str) -> Optional[BaseService]:
         """Get service instance."""
@@ -43,6 +66,10 @@ class ServiceRegistry:
     def get_all_services(self) -> Dict[str, BaseService]:
         """Get all service instances."""
         return self._instances.copy()
+
+    def clear_instances(self):
+        """Clear all service instances."""
+        self._instances.clear()
 
     def resolve_dependencies(self, target_services: List[str]) -> List[str]:
         """Resolve service dependencies and return installation order."""

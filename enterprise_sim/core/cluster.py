@@ -46,9 +46,9 @@ class ClusterManager:
             'k3d', 'cluster', 'create', self.config.name,
             '--agents', str(self.config.workers),
             '--registry-create', f'{self.config.name}-registry:{self.config.registry_port}',
+            '--api-port', f'127.0.0.1:{self.config.api_port}',
             '--port', f'{self.config.ingress_http_port}:80@loadbalancer',
             '--port', f'{self.config.ingress_https_port}:443@loadbalancer',
-            '--port', f'{self.config.api_port}:6443@loadbalancer',
             '--k3s-arg', '--disable=traefik@server:*'
         ]
 
@@ -72,6 +72,7 @@ class ClusterManager:
 
             # IMPORTANT: Update kubeconfig BEFORE initializing the client
             self.get_kubeconfig()
+            self._fix_kubeconfig()
             self.k8s_client = None  # Force re-initialization
 
             print("Waiting for cluster to be ready...")
@@ -233,6 +234,39 @@ class ClusterManager:
 
         except (subprocess.CalledProcessError, json.JSONDecodeError):
             return None
+
+    def _fix_kubeconfig(self):
+        """Correct the server address in the kubeconfig file if it points to 0.0.0.0."""
+        import yaml
+        from pathlib import Path
+
+        try:
+            kubeconfig_path = Path.home() / ".kube" / "config"
+            if not kubeconfig_path.exists():
+                print("   WARNING: Kubeconfig file not found.")
+                return
+
+            with open(kubeconfig_path, 'r') as f:
+                kubeconfig = yaml.safe_load(f)
+
+            cluster_name = f"k3d-{self.config.name}"
+            cluster_found = False
+            for cluster in kubeconfig.get("clusters", []):
+                if cluster.get("name") == cluster_name:
+                    server = cluster.get("cluster", {}).get("server", "")
+                    if "0.0.0.0" in server:
+                        new_server = server.replace("0.0.0.0", "127.0.0.1")
+                        cluster["cluster"]["server"] = new_server
+                        cluster_found = True
+                        break
+            
+            if cluster_found:
+                with open(kubeconfig_path, 'w') as f:
+                    yaml.dump(kubeconfig, f)
+                print(f"   ✅ Corrected kubeconfig server address for {cluster_name}")
+
+        except Exception as e:
+            print(f"   WARNING: Failed to fix kubeconfig: {e}")
 
     def _wait_for_api_server(self, timeout: int = 60) -> bool:
         """Wait for the Kubernetes API server to be ready."""

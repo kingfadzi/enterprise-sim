@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: minio-system
+  labels:
+    compliance.platform: enterprise-sim
+    istio-injection: enabled

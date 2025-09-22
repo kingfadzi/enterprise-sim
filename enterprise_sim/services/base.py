@@ -2,7 +2,7 @@
 
 from abc import ABC, abstractmethod
 from enum import Enum
-from typing import Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 from ..core.config import ServiceConfig
 from ..utils.k8s import KubernetesClient, HelmClient
 
@@ -28,10 +28,17 @@ class ServiceHealth(Enum):
 class BaseService(ABC):
     """Abstract base class for all enterprise simulation services."""
 
-    def __init__(self, config: ServiceConfig, k8s_client: KubernetesClient, helm_client: HelmClient):
+    def __init__(
+        self,
+        config: ServiceConfig,
+        k8s_client: KubernetesClient,
+        helm_client: HelmClient,
+        global_context: Optional[Dict[str, Any]] = None,
+    ):
         self.config = config
         self.k8s = k8s_client
         self.helm = helm_client
+        self.global_context: Dict[str, Any] = global_context or {}
         self._status = ServiceStatus.NOT_INSTALLED
 
     @property

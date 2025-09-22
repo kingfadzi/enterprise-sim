@@ -13,7 +13,7 @@ spec:
     name: minio-credentials
   pools:
   - name: pool-0
-    servers: 4
+    servers: 1
     volumesPerServer: 1
     volumeClaimTemplate:
       metadata:

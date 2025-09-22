@@ -220,6 +220,13 @@ class KubernetesClient:
                 return self.core_v1.read_namespaced_config_map(name, ns).to_dict()
             return self.core_v1.list_namespaced_config_map(ns).to_dict()
 
+        if resource_type in {'customresourcedefinition', 'customresourcedefinitions'}:
+            if not self.apiextensions_v1:
+                raise KeyError('Apiextensions client unavailable')
+            if name:
+                return self.apiextensions_v1.read_custom_resource_definition(name).to_dict()
+            return self.apiextensions_v1.list_custom_resource_definition().to_dict()
+
         if resource_type in {'deployment', 'deployments'}:
             if name:
                 return self.apps_v1.read_namespaced_deployment(name, ns).to_dict()

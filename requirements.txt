@@ -1,6 +1,6 @@
 # Core dependencies
 pyyaml>=6.0
-kubernetes>=28.1.0
+kubernetes
 cryptography>=3.4.8
 
 # Development dependencies (optional)

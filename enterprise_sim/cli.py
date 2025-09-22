@@ -4,12 +4,21 @@ import argparse
 import sys
 from typing import Optional
 
-from .core.config import ConfigManager
+from .core.config import ConfigManager, ServiceConfig
 from .core.cluster import ClusterManager
 from .core.regions import RegionManager
 from .core.validation import ServiceValidator
 from .utils.k8s import KubernetesClient, HelmClient
-from .services import service_registry, IstioService, CertManagerService, OpenEBSService, MinioService, SampleAppService
+from .services import (
+    service_registry,
+    IstioService,
+    CertManagerService,
+    OpenEBSService,
+    MinioService,
+    SampleAppService,
+)
+from .services.manifest_def import load_all_service_manifests
+from .services.manifest_service import ManifestService
 from .security import CertificateManager, PolicyManager, GatewayManager
 
 
@@ -32,46 +41,79 @@ class EnterpriseSimCLI:
         self.gateway_manager: Optional[GatewayManager] = None
         self.region_manager: Optional[RegionManager] = None
 
-    def _initialize(self, config_file: Optional[str] = None, post_cluster_creation: bool = False):
+    def _initialize_k8s_dependent_components(self):
+        """Initialize components that require a running k8s cluster."""
+        self.k8s_client = KubernetesClient()
+        if not self.k8s_client.core_v1:
+            raise InitializationError("Failed to connect to Kubernetes. Is a cluster running?")
+
+        self.helm_client = HelmClient()
+        self.validator = ServiceValidator(self.k8s_client)
+        self.cert_manager = CertificateManager(self.k8s_client)
+        self.policy_manager = PolicyManager(self.k8s_client)
+        self.gateway_manager = GatewayManager(self.k8s_client)
+        self.region_manager = RegionManager(self.k8s_client)
+
+        # Shared context for services
+        environment_copy = dict(self.config_manager.config.environment)
+        global_context = {
+            'environment': environment_copy,
+            'regions': list(self.config_manager.config.regions),
+        }
+        domain = environment_copy.get('domain', 'localhost')
+        env_name = self._derive_env_from_domain(domain)
+        environment_copy.setdefault('gateway_name', f"{env_name}-gateway")
+        global_context['gateway_name'] = environment_copy['gateway_name']
+
+        # Clear any existing service instances before creating new ones
+        service_registry.clear_instances()
+
+        # Register and create service instances
+        self._register_and_create_services(global_context)
+
+    def _register_and_create_services(self, global_context):
+        """Register all services and create instances."""
+        # Register built-in services
+        service_registry.register(IstioService)
+        service_registry.register(CertManagerService)
+        service_registry.register(OpenEBSService)
+        service_registry.register(SampleAppService)
+
+        # Register manifest-defined services
+        for manifest in load_all_service_manifests():
+            if manifest.service_id not in service_registry.registered_services():
+                def factory(cfg, k8s, helm, ctx, manifest=manifest):
+                    return ManifestService(manifest, cfg, k8s, helm, ctx)
+                service_registry.register_manifest(manifest, factory)
+
+            # Apply config defaults
+            svc_cfg = self.config_manager.config.services.setdefault(manifest.service_id, ServiceConfig())
+            for key, value in manifest.config_defaults.items():
+                svc_cfg.config.setdefault(key, value)
+
+        # Create service instances
+        for service_name, service_config in self.config_manager.config.services.items():
+            service_registry.create_instance(
+                service_name,
+                service_config,
+                self.k8s_client,
+                self.helm_client,
+                global_context,
+            )
+
+    def _initialize(self, config_file: Optional[str] = None, skip_k8s_init: bool = False):
         """Initialize managers and clients."""
         try:
-            if not post_cluster_creation:
-                self.config_manager = ConfigManager(config_file)
-                self.config_manager.validate_config()  # Validate config early
-                cluster_config = self.config_manager.get_cluster_config()
-                self.cluster_manager = ClusterManager(cluster_config)
+            self.config_manager = ConfigManager(config_file)
+            self.config_manager.validate_config()
+            cluster_config = self.config_manager.get_cluster_config()
+            self.cluster_manager = ClusterManager(cluster_config)
 
-            # Initialize clients and managers that depend on a running cluster
-            self.k8s_client = KubernetesClient()
-            self.helm_client = HelmClient()
-            self.validator = ServiceValidator(self.k8s_client)
+            if not skip_k8s_init:
+                self._initialize_k8s_dependent_components()
 
-            # Initialize managers
-            self.cert_manager = CertificateManager(self.k8s_client)
-            self.policy_manager = PolicyManager(self.k8s_client)
-            self.gateway_manager = GatewayManager(self.k8s_client)
-            self.region_manager = RegionManager(self.k8s_client)
-
-            # Register services
-            service_registry.register(IstioService)
-            service_registry.register(CertManagerService)
-            service_registry.register(OpenEBSService)
-            service_registry.register(MinioService)
-            service_registry.register(SampleAppService)
-
-            # Create service instances
-            for service_name, service_config in self.config_manager.config.services.items():
-                if service_name == 'istio':
-                    service_registry.create_instance(service_name, service_config, self.k8s_client, self.helm_client)
-                elif service_name == 'cert-manager':
-                    service_registry.create_instance(service_name, service_config, self.k8s_client, self.helm_client)
-                elif service_name == 'storage':
-                    service_registry.create_instance(service_name, service_config, self.k8s_client, self.helm_client)
-                elif service_name == 'minio':
-                    service_registry.create_instance(service_name, service_config, self.k8s_client, self.helm_client)
-                elif service_name == 'sample-app':
-                    service_registry.create_instance(service_name, service_config, self.k8s_client, self.helm_client)
-
+        except InitializationError:
+            raise  # Re-raise to be caught by the run method
         except Exception as e:
             raise InitializationError(f"Failed to initialize: {e}") from e
 
@@ -781,9 +823,11 @@ class EnterpriseSimCLI:
                 if not self.cluster_manager.create():
                     print("❌ ERROR: Failed to create cluster. Aborting build.")
                     return False
-                self._initialize(args.config, post_cluster_creation=True)
             else:
                 print("✅ SUCCESS: Cluster is already running.")
+
+            # Initialize k8s-dependent components now that we know the cluster exists.
+            self._initialize_k8s_dependent_components()
 
             # Step 1.2: Install Istio service mesh
             print("\nStep 1.2: Installing Istio Service Mesh")
@@ -975,7 +1019,25 @@ class EnterpriseSimCLI:
                 print("Reset cancelled")
                 return True
 
-        self._initialize(args.config)
+        # Initialize basic managers first (without k8s)
+        self._initialize(args.config, skip_k8s_init=True)
+
+        # Ensure cluster is running before attempting k8s operations
+        if self.cluster_manager.exists():
+            status = self.cluster_manager.get_status()
+            if status and status.get('serversRunning', 0) == 0:
+                print("Cluster exists but is not running. Starting cluster...")
+                if not self.cluster_manager.start():
+                    print("❌ ERROR: Failed to start cluster")
+                    return False
+                print("✅ SUCCESS: Cluster started")
+
+        # Now initialize k8s-dependent components
+        try:
+            self._initialize_k8s_dependent_components()
+        except InitializationError as e:
+            print(f"❌ ERROR: Failed to connect to Kubernetes: {e}")
+            return False
 
         try:
             # Phase 1: Teardown
@@ -1163,15 +1225,27 @@ class EnterpriseSimCLI:
             parser.print_help()
             return True
 
-        # Initialize managers and configuration before running any command
+        # For most commands, we need a running k8s cluster.
+        # We can skip k8s initialization for commands that manage the cluster itself
+        # or manage configuration.
+        commands_without_k8s = ['config']
+        skip_k8s = args.command in commands_without_k8s
+        if args.command == 'cluster' and args.cluster_command in ['create', 'delete', 'start', 'stop']:
+            skip_k8s = True
+        if args.command == 'reset':
+            skip_k8s = True
+
         try:
-            self._initialize(args.config)
+            self._initialize(args.config, skip_k8s_init=skip_k8s)
         except InitializationError as exc:
-            print(str(exc))
-            if getattr(args, 'verbose', False):
-                import traceback
-                traceback.print_exc()
-            return False
+            # For k8s-dependent commands, a failure to initialize is fatal.
+            # For other commands, it might be okay if the cluster is just not running.
+            if not skip_k8s:
+                print(f"Error: {exc}")
+                if getattr(args, 'verbose', False):
+                    import traceback
+                    traceback.print_exc()
+                return False
 
         # Handle nested commands
         if args.command == 'cluster' and not hasattr(args, 'func'):

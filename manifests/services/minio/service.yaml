@@ -1,0 +1,103 @@
+id: minio
+name: MinIO Object Storage
+namespace: minio-operator
+description: MinIO S3-compatible object storage
+version: 1.0.0
+dependencies:
+  - storage
+config_defaults:
+  storage_size: 10Gi
+  image: quay.io/minio/minio:RELEASE.2024-09-09T16-59-28Z
+  root_user: enterprise-admin
+  root_password: enterprise-password-123
+  console_passphrase: enterprise-sim-console-secret
+  console_salt: enterprise-sim-salt
+  gateway_name: local-sim-gateway
+install:
+  - type: helm
+    release: minio-operator
+    chart: operator
+    namespace: minio-operator
+    repo:
+      name: minio-operator
+      url: https://operator.min.io
+    wait_for:
+      - type: deployment
+        name: minio-operator
+        namespace: minio-operator
+        timeout: 300
+  - type: manifest
+    path: manifests/minio/namespace.yaml
+    context:
+      namespace: minio-system
+  - type: manifest
+    path: manifests/minio/credentials-secret.yaml
+    namespace: minio-system
+    context:
+      namespace: minio-system
+      root_user: '@config.root_user|enterprise-admin'
+      root_password: '@config.root_password|enterprise-password-123'
+  - type: manifest
+    path: manifests/minio/console-secret.yaml
+    namespace: minio-system
+    context:
+      namespace: minio-system
+      console_passphrase: '@config.console_passphrase|enterprise-sim-console-secret'
+      console_salt: '@config.console_salt|enterprise-sim-salt'
+  - type: manifest
+    path: manifests/minio/tenant.yaml
+    namespace: minio-system
+    context:
+      namespace: minio-system
+      image: '@config.image|quay.io/minio/minio:RELEASE.2024-09-09T16-59-28Z'
+      storage_size: '@config.storage_size|10Gi'
+    wait_for:
+      - type: custom_resource
+        group: minio.min.io
+        version: v2
+        plural: tenants
+        name: enterprise-sim
+        namespace: minio-system
+        condition:
+          path: status.currentState
+          equals: Initialized
+        timeout: 600
+  - type: manifest
+    path: manifests/minio/network-policy.yaml
+    namespace: minio-system
+    context:
+      namespace: minio-system
+  - type: manifest
+    path: manifests/minio/virtualservice-s3.yaml
+    namespace: minio-system
+    context:
+      namespace: minio-system
+      domain: '@env.domain|localhost'
+      gateway_name: '@config.gateway_name|local-sim-gateway'
+  - type: manifest
+    path: manifests/minio/virtualservice-console.yaml
+    namespace: minio-system
+    context:
+      namespace: minio-system
+      domain: '@env.domain|localhost'
+      gateway_name: '@config.gateway_name|local-sim-gateway'
+validations:
+  - type: deployment
+    name: minio-operator
+    namespace: minio-operator
+  - type: custom_resource
+    group: minio.min.io
+    version: v2
+    plural: tenants
+    name: enterprise-sim
+    namespace: minio-system
+    condition:
+      path: status.currentState
+      equals: Initialized
+endpoints:
+  - name: MinIO S3 API
+    url: https://s3.${domain}
+    type: External S3 API
+  - name: MinIO Console
+    url: https://minio-console.${domain}
+    type: External Web Console

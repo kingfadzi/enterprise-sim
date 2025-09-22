@@ -1,5 +1,6 @@
 """Region lifecycle management."""
 
+import time
 from typing import List
 from ..utils.k8s import KubernetesClient
 from ..utils.manifests import load_manifest_documents, load_single_manifest, render_manifest
@@ -18,6 +19,10 @@ class RegionManager:
             regions: List of region names (e.g., ['us', 'eu', 'ap'])
         """
         print("Setting up zero-trust security policies for regions")
+
+        if not self._wait_for_istio_crds():
+            print("ERROR: Required Istio CRDs are not available. Aborting region setup.")
+            return False
 
         success = True
         for region in regions:
@@ -85,6 +90,35 @@ class RegionManager:
                 return True
             print(f"ERROR: Failed to apply PeerAuthentication to {namespace}: {e}")
             return False
+
+    def _wait_for_istio_crds(self, timeout: int = 120) -> bool:
+        """Wait for Istio CRDs to be registered before applying policies."""
+        required_crds = [
+            'peerauthentications.security.istio.io',
+            'authorizationpolicies.security.istio.io',
+            'gateways.networking.istio.io',
+        ]
+
+        start = time.time()
+        while time.time() - start < timeout:
+            missing = [
+                crd for crd in required_crds
+                if not self.k8s.get_resource('customresourcedefinitions', crd)
+            ]
+            if not missing:
+                return True
+
+            wait_remaining = timeout - int(time.time() - start)
+            print(
+                "  Waiting for Istio CRDs to be ready (missing: {} | {}s remaining)".format(
+                    ', '.join(missing),
+                    wait_remaining,
+                )
+            )
+            time.sleep(5)
+
+        print("ERROR: Timed out waiting for Istio CRDs: {}".format(', '.join(required_crds)))
+        return False
 
 
     def _apply_authorization_policy(self, namespace: str) -> bool:
