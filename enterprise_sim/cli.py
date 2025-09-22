@@ -77,6 +77,7 @@ class EnterpriseSimCLI:
         service_registry.register(IstioService)
         service_registry.register(CertManagerService)
         service_registry.register(OpenEBSService)
+        service_registry.register(MinioService)
         service_registry.register(SampleAppService)
 
         # Register manifest-defined services

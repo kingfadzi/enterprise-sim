@@ -105,32 +105,33 @@ class ServiceRegistry:
 
     def _topological_sort(self, graph: Dict[str, Set[str]]) -> List[str]:
         """Perform topological sort on dependency graph."""
-        # Kahn's algorithm
-        in_degree = {node: 0 for node in graph}
+        # Kahn's algorithm with adjacency from dependency -> dependents
+        in_degree: Dict[str, int] = {}
+        adjacency: Dict[str, Set[str]] = {}
 
-        # Calculate in-degrees
+        for node, dependencies in graph.items():
+            in_degree.setdefault(node, 0)
+            for dependency in dependencies:
+                in_degree[node] = in_degree.get(node, 0) + 1
+                adjacency.setdefault(dependency, set()).add(node)
+                in_degree.setdefault(dependency, 0)
+
         for node in graph:
-            for neighbor in graph[node]:
-                if neighbor in in_degree:
-                    in_degree[neighbor] += 1
+            adjacency.setdefault(node, set())
 
-        # Find nodes with no dependencies
         queue = [node for node, degree in in_degree.items() if degree == 0]
-        result = []
+        result: List[str] = []
 
         while queue:
             node = queue.pop(0)
             result.append(node)
 
-            # Remove edges and update in-degrees
-            for neighbor in graph.get(node, set()):
-                if neighbor in in_degree:
-                    in_degree[neighbor] -= 1
-                    if in_degree[neighbor] == 0:
-                        queue.append(neighbor)
+            for dependent in adjacency.get(node, set()):
+                in_degree[dependent] -= 1
+                if in_degree[dependent] == 0:
+                    queue.append(dependent)
 
-        # Check for cycles
-        if len(result) != len(graph):
+        if len(result) != len(in_degree):
             cycle_nodes = [node for node, degree in in_degree.items() if degree > 0]
             raise DependencyError(f"Circular dependency detected involving: {cycle_nodes}")
 
@@ -166,10 +167,12 @@ class ServiceRegistry:
                     print(f"ERROR: Failed to install {service_name}")
                     return False
 
-                # Wait for service to be ready
+                # Wait for service health before moving on
                 print(f"Waiting for {service_name} to be ready...")
-                if not service.wait_for_ready(timeout=300):
-                    print(f"WARNING: {service_name} installation timed out, but continuing...")
+                if not service.wait_for_ready(timeout=600):
+                    elapsed = time.time() - start_time
+                    print(f"❌ {service_name} failed to become ready within 600s (elapsed {elapsed:.1f}s)")
+                    return False
 
                 elapsed = time.time() - start_time
                 print(f"{service_name} ready in {elapsed:.1f}s")

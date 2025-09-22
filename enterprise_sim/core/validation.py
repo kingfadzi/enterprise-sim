@@ -285,8 +285,8 @@ class ServiceValidator:
     def _check_deployment_status(self, service_name: str, namespace: str) -> ValidationResult:
         """Check deployment status."""
         try:
-            deployment = self.k8s.get_resource('deployment', service_name, namespace)
-            if not deployment:
+            summary = self.k8s.summarize_deployment_readiness(service_name, namespace)
+            if not summary:
                 return ValidationResult(
                     f"Deployment {service_name}",
                     False,
@@ -294,23 +294,22 @@ class ServiceValidator:
                     f"Deployment {service_name} does not exist in {namespace}"
                 )
 
-            status = deployment.get('status', {})
-            ready_replicas = status.get('readyReplicas', 0)
-            replicas = status.get('replicas', 0)
+            desired = summary['desired_replicas'] or summary['effective_total']
+            ready = summary['effective_ready']
 
-            if ready_replicas == replicas and replicas > 0:
+            if desired and ready >= desired:
                 return ValidationResult(
                     f"Deployment {service_name}",
                     True,
                     "Deployment is ready",
-                    f"{ready_replicas}/{replicas} replicas ready"
+                    f"{ready}/{desired} replicas ready"
                 )
             else:
                 return ValidationResult(
                     f"Deployment {service_name}",
                     False,
                     "Deployment not ready",
-                    f"Only {ready_replicas}/{replicas} replicas ready"
+                    f"Only {ready}/{desired} replicas ready"
                 )
 
         except Exception as e:
@@ -324,8 +323,8 @@ class ServiceValidator:
     def _check_pod_readiness(self, service_name: str, namespace: str) -> ValidationResult:
         """Check pod readiness."""
         try:
-            pods = self.k8s.get_pods(namespace, f'app={service_name}')
-            if not pods:
+            summary = self.k8s.summarize_pods(namespace, f'app={service_name}')
+            if summary['total'] == 0:
                 return ValidationResult(
                     f"Pods {service_name}",
                     False,
@@ -333,15 +332,8 @@ class ServiceValidator:
                     f"No pods with label app={service_name}"
                 )
 
-            ready_pods = 0
-            for pod in pods:
-                conditions = pod.get('status', {}).get('conditions', [])
-                for condition in conditions:
-                    if condition.get('type') == 'Ready' and condition.get('status') == 'True':
-                        ready_pods += 1
-                        break
-
-            total_pods = len(pods)
+            ready_pods = summary['ready']
+            total_pods = summary['total']
             if ready_pods == total_pods:
                 return ValidationResult(
                     f"Pods {service_name}",

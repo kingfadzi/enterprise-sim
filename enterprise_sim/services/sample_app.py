@@ -129,18 +129,16 @@ class SampleAppService(BaseService):
             app_name = self.config.config.get("app_name", "hello-app")
 
             # Check deployment
-            deployment = self.k8s.get_resource("deployment", app_name, self.namespace)
-            if not deployment:
+            summary = self.k8s.summarize_deployment_readiness(app_name, self.namespace)
+            if not summary:
                 return ServiceHealth.UNHEALTHY
 
-            # Check deployment status
-            status = deployment.get("status", {})
-            ready_replicas = status.get("readyReplicas", 0)
-            replicas = status.get("replicas", 0)
+            desired = summary['desired_replicas'] or summary['effective_total']
+            ready = summary['effective_ready']
 
-            if ready_replicas == replicas and replicas > 0:
+            if desired and ready >= desired:
                 return ServiceHealth.HEALTHY
-            elif ready_replicas > 0:
+            elif ready > 0:
                 return ServiceHealth.DEGRADED
             else:
                 return ServiceHealth.UNHEALTHY

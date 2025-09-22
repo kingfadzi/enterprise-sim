@@ -298,7 +298,7 @@ class KubernetesClient:
                                   field_selector=f"metadata.name={name}",
                                   timeout_seconds=timeout):
                 deployment = event['object']
-                if deployment.status.available_replicas == deployment.spec.replicas:
+                if (deployment.status.available_replicas or 0) == deployment.spec.replicas:
                     w.stop()
                     return True
             return False
@@ -355,16 +355,132 @@ class KubernetesClient:
             return False
 
     def get_pods(self, namespace: Optional[str] = None, selector: Optional[str] = None) -> List[Dict]:
-        """Get pod information."""
+        """Get pod information, falling back to kubectl when needed."""
         ns = namespace or self.default_namespace
+
+        if not self.core_v1:
+            return self._kubectl_list_pods(ns, selector)
+
         try:
             if selector:
                 pods = self.core_v1.list_namespaced_pod(ns, label_selector=selector)
             else:
                 pods = self.core_v1.list_namespaced_pod(ns)
             return [p.to_dict() for p in pods.items]
-        except ApiException:
+        except (ApiException, AttributeError):
+            return self._kubectl_list_pods(ns, selector)
+
+    def summarize_pods(self, namespace: str, selector: Optional[str] = None) -> Dict[str, Any]:
+        """Return ready/total pod counts for a label selector."""
+        pods = self.get_pods(namespace, selector)
+        ready = sum(1 for pod in pods if self._is_pod_ready(pod))
+        return {
+            'pods': pods,
+            'ready': ready,
+            'total': len(pods),
+        }
+
+    def summarize_deployment_readiness(self, deployment_name: str, namespace: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Return readiness details for a deployment based on underlying pods."""
+        ns = namespace or self.default_namespace
+        deployment = self.get_resource('deployment', deployment_name, ns)
+        if not deployment:
+            return None
+
+        spec = deployment.get('spec', {})
+        status = deployment.get('status', {})
+
+        selector = spec.get('selector', {}) if isinstance(spec, dict) else {}
+        match_labels = self._extract_match_labels(selector)
+        if not match_labels:
+            match_labels = self._extract_template_labels(spec)
+
+        label_selector = self._build_label_selector(match_labels)
+        pod_summary = self.summarize_pods(ns, label_selector) if match_labels else {'pods': [], 'ready': 0, 'total': 0}
+
+        desired = spec.get('replicas')
+        if desired is None:
+            desired = status.get('replicas')
+        if desired is None:
+            desired = pod_summary['total'] or status.get('readyReplicas') or status.get('ready_replicas') or 0
+
+        ready_replicas = status.get('readyReplicas')
+        if ready_replicas is None:
+            ready_replicas = status.get('ready_replicas', 0)
+
+        available_replicas = status.get('availableReplicas')
+        if available_replicas is None:
+            available_replicas = status.get('available_replicas', ready_replicas)
+
+        pods_observed = pod_summary['total'] > 0
+        effective_ready = pod_summary['ready'] if pods_observed else int(ready_replicas or 0)
+        effective_total = pod_summary['total'] if pods_observed else int(desired or 0)
+
+        return {
+            'deployment': deployment,
+            'desired_replicas': int(desired or 0),
+            'ready_replicas': int(ready_replicas or 0),
+            'available_replicas': int(available_replicas or 0),
+            'pods_observed': pods_observed,
+            'ready_pods': pod_summary['ready'],
+            'total_pods': pod_summary['total'],
+            'label_selector': label_selector,
+            'effective_ready': effective_ready,
+            'effective_total': effective_total,
+        }
+
+    def _kubectl_list_pods(self, namespace: str, selector: Optional[str]) -> List[Dict]:
+        """Fallback to kubectl for listing pods."""
+        cmd = ['kubectl', 'get', 'pods', '-n', namespace, '-o', 'json']
+        if selector:
+            cmd.extend(['-l', selector])
+        try:
+            result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+            data = json.loads(result.stdout)
+            return data.get('items', [])
+        except (subprocess.CalledProcessError, json.JSONDecodeError):
             return []
+
+    @staticmethod
+    def _is_pod_ready(pod: Dict[str, Any]) -> bool:
+        """Determine if a pod is ready using phase and container readiness."""
+        status = pod.get('status', {})
+        if status.get('phase') != 'Running':
+            return False
+
+        container_statuses = status.get('containerStatuses')
+        if container_statuses is None:
+            container_statuses = status.get('container_statuses', [])
+
+        if container_statuses:
+            return all(cs.get('ready') for cs in container_statuses)
+
+        for condition in status.get('conditions', []):
+            if condition.get('type') == 'Ready':
+                return condition.get('status') == 'True'
+        return False
+
+    @staticmethod
+    def _extract_match_labels(selector: Dict[str, Any]) -> Dict[str, str]:
+        """Extract matchLabels from a deployment selector."""
+        if not isinstance(selector, dict):
+            return {}
+        return selector.get('matchLabels') or selector.get('match_labels') or {}
+
+    @staticmethod
+    def _extract_template_labels(spec: Dict[str, Any]) -> Dict[str, str]:
+        """Extract pod template labels as a fallback selector."""
+        template = spec.get('template', {}) if isinstance(spec, dict) else {}
+        metadata = template.get('metadata', {}) if isinstance(template, dict) else {}
+        labels = metadata.get('labels', {})
+        return labels if isinstance(labels, dict) else {}
+
+    @staticmethod
+    def _build_label_selector(labels: Dict[str, str]) -> Optional[str]:
+        """Convert a labels dict into a Kubernetes selector string."""
+        if not labels:
+            return None
+        return ','.join(f"{key}={value}" for key, value in labels.items())
 
     def get_services(self, namespace: Optional[str] = None) -> List[Dict]:
         """Get service information."""

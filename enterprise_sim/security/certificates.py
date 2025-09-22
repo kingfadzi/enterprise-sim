@@ -176,17 +176,14 @@ DNS.2 = {self.wildcard_domain}
     def _is_cert_manager_available(self) -> bool:
         """Check if cert-manager is installed and ready."""
         try:
-            # Check cert-manager deployment
-            deployment = self.k8s.get_resource('deployment', 'cert-manager', 'cert-manager')
-            if not deployment:
+            summary = self.k8s.summarize_deployment_readiness('cert-manager', 'cert-manager')
+            if not summary:
                 return False
 
-            # Check if ready
-            status = deployment.get('status', {})
-            ready_replicas = status.get('readyReplicas', 0)
-            replicas = status.get('replicas', 0)
+            desired = summary['desired_replicas'] or summary['effective_total']
+            ready = summary['effective_ready']
 
-            return ready_replicas == replicas and replicas > 0
+            return bool(desired) and ready >= desired
 
         except Exception:
             return False

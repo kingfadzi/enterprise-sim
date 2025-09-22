@@ -206,14 +206,13 @@ class ManifestService(BaseService):
 
     def _run_validation(self, spec: ValidationSpec) -> (bool, str):
         if spec.type == 'deployment' and spec.name and spec.namespace:
-            deployment = self.k8s.get_resource('deployment', spec.name, spec.namespace)
-            if not deployment:
+            summary = self.k8s.summarize_deployment_readiness(spec.name, spec.namespace)
+            if not summary:
                 return False, f"Deployment {spec.name} missing in {spec.namespace}"
-            status = deployment.get('status', {})
-            ready = status.get('readyReplicas', 0)
-            replicas = status.get('replicas', 0)
-            ok = ready == replicas and replicas > 0
-            return ok, f"Deployment {spec.name} ready ({ready}/{replicas})"
+            desired = summary['desired_replicas'] or summary['effective_total']
+            ready = summary['effective_ready']
+            ok = bool(desired) and ready >= desired
+            return ok, f"Deployment {spec.name} ready ({ready}/{desired})"
 
         if spec.type == 'custom_resource' and all([spec.group, spec.version, spec.plural, spec.name, spec.namespace]):
             try:

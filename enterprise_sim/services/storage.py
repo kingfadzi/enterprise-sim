@@ -125,23 +125,22 @@ class OpenEBSService(BaseService):
         """Get OpenEBS service health."""
         # Check if OpenEBS deployment exists
         deployment_name = f"{self.name}-openebs-localpv-provisioner"
-        deployment = self.k8s.get_resource("deployment", deployment_name, self.namespace)
-        if not deployment:
+        summary = self.k8s.summarize_deployment_readiness(deployment_name, self.namespace)
+        if not summary:
             return ServiceHealth.UNHEALTHY
 
-        # Check deployment status
-        status = deployment.get("status", {})
-        ready_replicas = status.get("readyReplicas", 0)
-        replicas = status.get("replicas", 0)
+        desired = summary['desired_replicas'] or summary['effective_total']
+        ready = summary['effective_ready']
 
-        if ready_replicas == replicas and replicas > 0:
+        if desired and ready >= desired:
             # Additional health checks - validate storage classes
             if self._validate_storage_classes():
                 return ServiceHealth.HEALTHY
             else:
                 return ServiceHealth.DEGRADED
-        else:
+        if ready > 0:
             return ServiceHealth.DEGRADED
+        return ServiceHealth.UNHEALTHY
 
 
     def _wait_for_openebs_ready(self, timeout: int = 300) -> bool:

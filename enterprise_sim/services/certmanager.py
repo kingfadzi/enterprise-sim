@@ -153,17 +153,16 @@ class CertManagerService(BaseService):
             degraded = False
 
             for deployment_name in deployments:
-                deployment = self.k8s.get_resource('deployment', deployment_name, self.namespace)
-                if not deployment:
+                summary = self.k8s.summarize_deployment_readiness(deployment_name, self.namespace)
+                if not summary:
                     return ServiceHealth.UNHEALTHY
 
-                status = deployment.get('status', {})
-                ready_replicas = status.get('readyReplicas', 0)
-                replicas = status.get('replicas', 0)
+                desired = summary['desired_replicas'] or summary['effective_total']
+                ready = summary['effective_ready']
 
-                if ready_replicas == 0:
+                if ready == 0:
                     all_healthy = False
-                elif ready_replicas < replicas:
+                elif desired and ready < desired:
                     degraded = True
 
             if all_healthy and not degraded:
