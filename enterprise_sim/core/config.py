@@ -14,8 +14,8 @@ class ClusterConfig:
     workers: int = 3
     registry_port: int = 5000
     api_port: int = 6443
-    ingress_http_port: int = 8090  # Changed from 8080 to avoid Rancher conflicts
-    ingress_https_port: int = 8453  # Changed from 8443 to avoid Rancher conflicts
+    ingress_http_port: int = 80   # Standard HTTP port
+    ingress_https_port: int = 443  # Standard HTTPS port
     volume_mounts: List[str] = field(default_factory=list)
 
 
@@ -87,8 +87,8 @@ class ConfigManager:
             workers=cluster_data.get('workers', 3),
             registry_port=cluster_data.get('registry_port', 5000),
             api_port=cluster_data.get('api_port', 6443),
-            ingress_http_port=cluster_data.get('ingress_http_port', 8090),
-            ingress_https_port=cluster_data.get('ingress_https_port', 8453),
+            ingress_http_port=cluster_data.get('ingress_http_port', 80),
+            ingress_https_port=cluster_data.get('ingress_https_port', 443),
             volume_mounts=cluster_data.get('volume_mounts', [])
         )
 

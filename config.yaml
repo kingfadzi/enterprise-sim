@@ -3,8 +3,8 @@ cluster:
   workers: 3
   registry_port: 5001
   api_port: 6443
-  ingress_http_port: 8090
-  ingress_https_port: 8453
+  ingress_http_port: 80
+  ingress_https_port: 443
   volume_mounts:
     - ./.enterprise-sim/storage:/var/openebs
 
