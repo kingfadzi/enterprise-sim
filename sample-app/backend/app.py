@@ -11,7 +11,7 @@ import time
 from datetime import datetime
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
-from enterprise_sim.utils.k8s import KubernetesClient
+# from enterprise_sim.utils.k8s import KubernetesClient
 
 APP_NAME = os.getenv("APP_NAME", "hello-app")
 REGION = os.getenv("REGION", "us")
@@ -20,8 +20,8 @@ NAMESPACE = os.getenv("NAMESPACE", "default")
 app = Flask(__name__, static_folder='frontend/build', static_url_path='')
 CORS(app)
 
-# Initialize the Kubernetes client
-k8s_client = KubernetesClient()
+# Initialize the Kubernetes client (optional for demo)
+k8s_client = None
 
 def check_storage_mounted():
     """Check if persistent storage is mounted and accessible"""
@@ -158,7 +158,7 @@ def get_disaster_recovery_status(storage_info):
     """Get real disaster recovery status"""
     try:
         # Check for Velero backup system
-        velero_available = k8s_client.get_resource('backups', namespace='-A') is not None
+        velero_available = k8s_client.get_resource('backups', namespace='-A') is not None if k8s_client else False
 
         return {
             "backup_enabled": velero_available,
@@ -300,15 +300,15 @@ def get_advanced_networking_status():
     """Get advanced networking features status"""
     try:
         # Check for egress policies (look for specific NetworkPolicies)
-        netpols = k8s_client.get_resource('networkpolicies', namespace='-A')
+        netpols = k8s_client.get_resource('networkpolicies', namespace='-A') if k8s_client else None
         egress_policies = netpols and 'items' in netpols and len(netpols['items']) > 0
 
         # Check for WAF (look for Envoy filters or ModSecurity)
-        envoy_filters = k8s_client.get_resource('envoyfilters', namespace='-A')
+        envoy_filters = k8s_client.get_resource('envoyfilters', namespace='-A') if k8s_client else None
         waf_enabled = envoy_filters and 'items' in envoy_filters and len(envoy_filters['items']) > 0
 
         # Check for service entries (external service registration)
-        service_entries_result = k8s_client.get_resource('serviceentries', namespace='-A')
+        service_entries_result = k8s_client.get_resource('serviceentries', namespace='-A') if k8s_client else None
         service_entries = service_entries_result and 'items' in service_entries_result and len(service_entries_result['items']) > 0
 
         return {

@@ -216,6 +216,24 @@ class SampleAppService(BaseService):
             raise ValueError("Domain not configured in environment settings")
         return domain
 
+    def _derive_env_from_domain(self, domain: str) -> str:
+        """Derive environment name from the configured domain."""
+        if not domain or domain in {"localhost", "127.0.0.1"}:
+            return "local"
+        parts = domain.split('.')
+        if len(parts) < 2:
+            return "local"
+        return parts[0]
+
+    def _get_gateway_name(self, domain: str) -> str:
+        """Return the gateway name derived from context and domain."""
+        if self.global_context:
+            gateway_name = self.global_context.get('gateway_name')
+            if gateway_name:
+                return gateway_name
+        env = self._derive_env_from_domain(domain)
+        return f"{env}-gateway"
+
     def _wait_for_app_ready(self, timeout: int = 300) -> bool:
         """Wait for application deployment to be ready."""
         app_name = self.config.config.get("app_name", "hello-app")
@@ -374,7 +392,7 @@ class SampleAppService(BaseService):
             app_name = self.config.config.get("app_name", "hello-app")
             region = self.config.config.get("region", "us")
             domain = self._get_domain()
-            gateway_name = 'local-sim-gateway'
+            gateway_name = self._get_gateway_name(domain)
 
             manifest_text = render_manifest(
                 "manifests/sample-app/virtualservice.yaml",
@@ -423,7 +441,7 @@ class SampleAppService(BaseService):
                 'NAMESPACE': self.namespace,
                 'ROUTE_HOST': self.config.config.get("app_name", "hello-app"),
                 'K3S_INGRESS_DOMAIN': self._get_domain(),
-                'GATEWAY_NAME': 'local-sim-gateway'
+                'GATEWAY_NAME': self._get_gateway_name(self._get_domain())
             })
 
             # Delete resources using kubectl kustomize

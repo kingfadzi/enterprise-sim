@@ -31,11 +31,13 @@ class ManifestService(BaseService):
             self.config.config.setdefault(key, value)
 
         # Derive gateway default from environment when available
-        if 'gateway_name' not in self.config.config:
-            env = (self.global_context or {}).get('environment', {})
-            domain = env.get('domain', 'localhost')
-            env_name = self._derive_env_from_domain(domain)
-            self.config.config['gateway_name'] = f"{env_name}-gateway"
+        env = (self.global_context or {}).get('environment', {})
+        domain = env.get('domain', 'localhost')
+        env_name = self._derive_env_from_domain(domain)
+        gateway_default = f"{env_name}-gateway"
+
+        if self.config.config.get('gateway_name') in (None, 'local-sim-gateway'):
+            self.config.config['gateway_name'] = gateway_default
 
     # ------------------------------------------------------------------
     # Properties required by BaseService

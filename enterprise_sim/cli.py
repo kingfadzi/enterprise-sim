@@ -1023,55 +1023,59 @@ class EnterpriseSimCLI:
         # Initialize basic managers first (without k8s)
         self._initialize(args.config, skip_k8s_init=True)
 
-        # Ensure cluster is running before attempting k8s operations
-        if self.cluster_manager.exists():
-            status = self.cluster_manager.get_status()
-            if status and status.get('serversRunning', 0) == 0:
-                print("Cluster exists but is not running. Starting cluster...")
-                if not self.cluster_manager.start():
-                    print("❌ ERROR: Failed to start cluster")
-                    return False
-                print("✅ SUCCESS: Cluster started")
-
-        # Now initialize k8s-dependent components
         try:
-            self._initialize_k8s_dependent_components()
-        except InitializationError as e:
-            print(f"❌ ERROR: Failed to connect to Kubernetes: {e}")
-            return False
-
-        try:
-            # Phase 1: Teardown
-            print("\nPhase 1: Tearing Down Platform")
-            print("-" * 30)
-
-            # Step 1.1: Uninstall all services
-            print("Step 1.1: Removing All Services")
-            all_services = ['sample-app', 'minio', 'storage', 'cert-manager', 'istio']
-
-            for service_name in all_services:
-                service = service_registry.get_service(service_name)
-                if service and service.is_installed():
-                    print(f"Uninstalling {service_name}...")
-                    try:
-                        service.uninstall()
-                    except Exception as e:
-                        print(f"WARNING: Error uninstalling {service_name}: {e}")
-
-            # Step 1.2: Remove sample-app .env file
-            print("Step 1.2: Cleaning up environment files")
-            self._cleanup_env_files()
-
-            # Step 1.3: Destroy cluster
-            print("Step 1.3: Destroying Cluster")
             if self.cluster_manager.exists():
-                print("Destroying k3d cluster...")
-                if not self.cluster_manager.delete():
-                    print("WARNING: Cluster deletion encountered issues")
+                print("Existing cluster found. Tearing down...")
+
+                # Start cluster if stopped
+                status = self.cluster_manager.get_status()
+                if status and status.get('serversRunning', 0) == 0:
+                    print("Cluster exists but is not running. Starting cluster...")
+                    if not self.cluster_manager.start():
+                        print("❌ ERROR: Failed to start cluster")
+                        return False
+                    print("✅ SUCCESS: Cluster started")
+
+                # Now that cluster is running, initialize k8s components for teardown
+                try:
+                    self._initialize_k8s_dependent_components()
+                except InitializationError as e:
+                    print(f"❌ ERROR: Failed to connect to Kubernetes during teardown: {e}")
+                    return False
+
+                # Phase 1: Teardown
+                print("\nPhase 1: Tearing Down Platform")
+                print("-" * 30)
+
+                # Step 1.1: Uninstall all services
+                print("Step 1.1: Removing All Services")
+                all_services = ['sample-app', 'minio', 'storage', 'cert-manager', 'istio']
+
+                for service_name in all_services:
+                    service = service_registry.get_service(service_name)
+                    if service and service.is_installed():
+                        print(f"Uninstalling {service_name}...")
+                        try:
+                            service.uninstall()
+                        except Exception as e:
+                            print(f"WARNING: Error uninstalling {service_name}: {e}")
+
+                # Step 1.2: Remove sample-app .env file
+                print("Step 1.2: Cleaning up environment files")
+                self._cleanup_env_files()
+
+                # Step 1.3: Destroy cluster
+                print("Step 1.3: Destroying Cluster")
+                if self.cluster_manager.exists():
+                    print("Destroying k3d cluster...")
+                    if not self.cluster_manager.delete():
+                        print("WARNING: Cluster deletion encountered issues")
+                    else:
+                        print("SUCCESS: Cluster destroyed")
                 else:
-                    print("SUCCESS: Cluster destroyed")
+                    print("SUCCESS: Cluster already removed")
             else:
-                print("SUCCESS: Cluster already removed")
+                print("No existing cluster found. Skipping teardown.")
 
             # Phase 2: Clean rebuild
             print("\nPhase 2: Rebuilding Platform")
