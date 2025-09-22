@@ -6,7 +6,7 @@ cluster:
   ingress_http_port: 8090
   ingress_https_port: 8453
   volume_mounts:
-    - ./cluster-state/storage:/var/openebs
+    - ./.enterprise-sim/storage:/var/openebs
 
 services:
   istio:

@@ -1,6 +1,7 @@
 """OpenEBS storage service implementation."""
 
 import time
+from pathlib import Path
 from typing import Dict, Any, Set, List, Optional
 from ..services.base import BaseService, ServiceStatus, ServiceHealth, ServiceConfig
 from ..utils.k8s import KubernetesClient, HelmClient
@@ -157,35 +158,43 @@ class OpenEBSService(BaseService):
 
     def _create_storage_classes(self) -> bool:
         """Create enterprise storage classes."""
-        # Ensure cluster-state storage directory exists
-        import os
-        storage_base = os.path.abspath("./cluster-state/storage")
+        # Use a writable storage root inside the current working directory
+        storage_base = Path.cwd() / ".enterprise-sim" / "storage"
 
-        storage_classes = [
-            {
-                "name": "enterprise-standard",
-                "tier": "standard",
-                "basePath": f"{storage_base}/standard",
-                "isDefault": True
-            },
-            {
-                "name": "enterprise-ssd",
-                "tier": "ssd",
-                "basePath": f"{storage_base}/ssd",
-                "isDefault": False
-            },
-            {
-                "name": "enterprise-fast",
-                "tier": "fast",
-                "basePath": f"{storage_base}/fast",
-                "isDefault": False
-            }
+        try:
+            storage_base.mkdir(parents=True, exist_ok=True)
+        except PermissionError as exc:
+            print(f"ERROR: Cannot create storage base directory '{storage_base}': {exc}")
+            print("       Ensure the current working directory is writable or adjust your working path.")
+            return False
+
+        class_definitions = [
+            ("enterprise-standard", "standard", True),
+            ("enterprise-ssd", "ssd", False),
+            ("enterprise-fast", "fast", False),
         ]
 
+        storage_classes: List[Dict[str, Any]] = []
+
         # Create storage directories
-        for sc in storage_classes:
-            os.makedirs(sc["basePath"], exist_ok=True)
-            print(f"  Created storage directory: {sc['basePath']}")
+        for name, tier, is_default in class_definitions:
+            tier_path = storage_base / tier
+            try:
+                tier_path.mkdir(parents=True, exist_ok=True)
+            except PermissionError as exc:
+                print(f"ERROR: Cannot create storage directory '{tier_path}': {exc}")
+                print("       Ensure the current working directory's .enterprise-sim/storage is writable.")
+                return False
+
+            print(f"  Created storage directory: {tier_path}")
+            storage_classes.append(
+                {
+                    "name": name,
+                    "tier": tier,
+                    "basePath": str(tier_path),
+                    "isDefault": is_default,
+                }
+            )
 
         print(f"Storage base directory: {storage_base}")
 
